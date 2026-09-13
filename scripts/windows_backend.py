@@ -125,6 +125,7 @@ class WindowsBackend:
             )
 
         self._enable_dpi_awareness()
+        self._attach_to_default_desktop()
         try:
             import pyautogui
             import pywintypes
@@ -149,6 +150,17 @@ class WindowsBackend:
 
         self.pyautogui.FAILSAFE = True
         self.pyautogui.PAUSE = 0.15
+
+    @staticmethod
+    def _attach_to_default_desktop() -> None:
+        try:
+            import win32con
+            import win32service
+            hdesk = win32service.OpenDesktop("default", 0, False, win32con.GENERIC_ALL)
+            if hdesk:
+                ctypes.windll.user32.SetThreadDesktop(int(hdesk))
+        except Exception:
+            pass
 
     @staticmethod
     def _enable_dpi_awareness() -> None:
