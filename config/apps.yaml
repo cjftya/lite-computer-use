@@ -1,0 +1,76 @@
+apps:
+  chrome:
+    aliases: [chrome, google chrome, 크롬, 구글 크롬]
+    commands: [chrome.exe]
+
+  edge:
+    aliases: [edge, microsoft edge, 엣지, 마이크로소프트 엣지]
+    commands: [msedge.exe]
+
+  firefox:
+    aliases: [firefox, 파이어폭스]
+    commands: [firefox.exe]
+
+  notepad:
+    aliases: [notepad, 메모장]
+    commands: [notepad.exe]
+
+  calculator:
+    aliases: [calculator, calc, 계산기]
+    commands: [calc.exe]
+
+  explorer:
+    aliases: [explorer, file explorer, 파일 탐색기, 탐색기]
+    commands: [explorer.exe]
+
+  word:
+    aliases: [word, microsoft word, 워드, 마이크로소프트 워드]
+    commands: [winword.exe]
+
+  excel:
+    aliases: [excel, microsoft excel, 엑셀, 마이크로소프트 엑셀]
+    commands: [excel.exe]
+
+  powerpoint:
+    aliases: [powerpoint, microsoft powerpoint, 파워포인트]
+    commands: [powerpnt.exe]
+
+  outlook:
+    aliases: [outlook, microsoft outlook, 아웃룩]
+    commands: [outlook.exe, olk.exe]
+
+  teams:
+    aliases: [teams, microsoft teams, 팀즈, 마이크로소프트 팀즈]
+    commands: [ms-teams.exe, "msteams:"]
+
+  vscode:
+    aliases: [vscode, visual studio code, vs code, 비주얼 스튜디오 코드]
+    commands: [code.exe, code.cmd]
+
+  paint:
+    aliases: [paint, microsoft paint, 그림판]
+    commands: [mspaint.exe]
+
+  snipping-tool:
+    aliases: [snipping tool, 캡처 도구, 스니핑 툴]
+    commands: [snippingtool.exe]
+
+  powershell:
+    aliases: [powershell, 파워쉘, 파워셸]
+    commands: [powershell.exe]
+
+  command-prompt:
+    aliases: [command prompt, cmd, 명령 프롬프트]
+    commands: [cmd.exe]
+
+  settings:
+    aliases: [settings, windows settings, 설정, 윈도우 설정]
+    commands: ["ms-settings:"]
+
+  task-manager:
+    aliases: [task manager, 작업 관리자]
+    commands: [taskmgr.exe]
+
+  adobe-reader:
+    aliases: [adobe reader, acrobat reader, 어도비 리더, 아크로뱃 리더]
+    commands: [AcroRd32.exe, Acrobat.exe]

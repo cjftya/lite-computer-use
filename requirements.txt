@@ -1,0 +1,4 @@
+Pillow>=10.4,<13
+PyAutoGUI>=0.9.54,<1
+PyYAML>=6.0,<7
+pywin32>=306; sys_platform == "win32"
