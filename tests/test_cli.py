@@ -4,11 +4,16 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "lcu_tools.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from lcu_tools import build_parser, run_action
 
 
 class CLITests(unittest.TestCase):
@@ -80,11 +85,90 @@ class CLITests(unittest.TestCase):
         completed = self.run_cli(
             "sequence", "--json", '[{"action":"screenshot"}]'
         )
-        # Platform validation happens before the sequence parser because all
-        # sequence actions are Windows primitives.
         self.assertEqual(2, completed.returncode)
         payload = json.loads(completed.stdout)
-        self.assertEqual("unsupported_platform", payload["error"]["code"])
+        self.assertEqual("sequence_action_not_allowed", payload["error"]["code"])
+
+    def test_invalid_arguments_are_structured_json(self) -> None:
+        completed = self.run_cli("--unknown-option")
+        self.assertEqual(2, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertEqual("invalid_arguments", payload["error"]["code"])
+        self.assertEqual("parse", payload["error"]["details"]["stage"])
+
+    def test_relative_config_path_is_rejected(self) -> None:
+        completed = self.run_cli("--config", "config/apps.yaml", "doctor")
+        self.assertEqual(2, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertEqual("relative_path_not_allowed", payload["error"]["code"])
+        self.assertEqual("validate_config", payload["error"]["details"]["stage"])
+
+    def test_doctor_uses_runtime_root_from_a_different_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            completed = subprocess.run(
+                [sys.executable, str(CLI), "doctor"],
+                cwd=temp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        result = json.loads(completed.stdout)["result"]
+        self.assertEqual(str(ROOT), result["runtime"]["projectRoot"])
+        self.assertEqual(str(CLI), result["runtime"]["scriptPath"])
+        self.assertEqual("1.4.0", result["version"])
+
+    @unittest.skipIf(os.name == "nt", "Non-Windows parser test")
+    def test_sequence_accepts_utf8_file_and_stdin(self) -> None:
+        sequence = '[{"action":"type_text","text":"한글"}]'
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sequence.json"
+            path.write_text(sequence, encoding="utf-8-sig")
+            from_file = self.run_cli("sequence", "--file", str(path))
+        from_stdin = subprocess.run(
+            [sys.executable, str(CLI), "sequence", "--stdin"],
+            cwd=ROOT,
+            input=sequence,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        for completed in (from_file, from_stdin):
+            with self.subTest(args=completed.args):
+                self.assertEqual(2, completed.returncode)
+                payload = json.loads(completed.stdout)
+                self.assertEqual("unsupported_platform", payload["error"]["code"])
+
+    def test_sequence_inputs_are_mutually_exclusive(self) -> None:
+        completed = self.run_cli("sequence", "--json", "[]", "--stdin")
+        self.assertEqual(2, completed.returncode)
+        self.assertEqual(
+            "invalid_arguments", json.loads(completed.stdout)["error"]["code"]
+        )
+
+    def test_direct_open_route_never_constructs_gui_backend(self) -> None:
+        args = build_parser().parse_args(["open_file", str(ROOT / "README.md")])
+        direct = Mock()
+        direct.open_file.return_value = {"status": "dispatch_accepted"}
+        with patch("lcu_tools.direct_backend", return_value=direct), patch(
+            "lcu_tools.windows_backend", side_effect=AssertionError("GUI backend loaded")
+        ):
+            result = run_action(args)
+        self.assertEqual("dispatch_accepted", result["status"])
+        direct.open_file.assert_called_once_with(str(ROOT / "README.md"))
+
+    def test_targeted_standalone_input_loads_alias_registry(self) -> None:
+        args = build_parser().parse_args(["type_text", "한글", "--target", "크롬"])
+        backend = Mock()
+        backend.ensure_input_target.return_value = {"hwnd": 7, "pid": 10}
+        backend.type_text.return_value = {"length": 2}
+        with patch("lcu_tools.windows_backend", return_value=backend) as factory:
+            result = run_action(args)
+        registry = factory.call_args.args[0]
+        self.assertEqual("chrome", registry.resolve("크롬").name)
+        backend.ensure_input_target.assert_called_once_with("크롬", None, None)
+        backend.type_text.assert_called_once_with("한글", 0.0)
+        self.assertTrue(result["target"]["foregroundVerified"])
 
 
 if __name__ == "__main__":

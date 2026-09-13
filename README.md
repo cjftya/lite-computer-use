@@ -4,15 +4,18 @@ Lite Computer Use is a lightweight Windows computer-use skill for host agents su
 
 The project deliberately has no DOM integration, Playwright, Selenium, OCR engine, accessibility-tree crawler, app-specific automation framework, autonomous agent loop, scheduler, or background workflow engine.
 
-## What changed in v1.3.1
+## What changed in v1.4
 
-v1.3.1 extends the v1.3 Fast Path with lower-latency discovery and vision:
+v1.4 fixes the execution path failures that caused agents to guess folders or repeat the same launch:
 
-- Screenshots can be downscaled to 25–100% for a cheap preview before a precise region capture.
-- Installed apps are indexed from Start Menu shortcuts and Windows App Paths, then cached for 24 hours.
-- Window matching can use process basenames after title matching, without exposing executable paths.
-- `sequence` now covers launch, bounded wait, move, and single-click steps as well as keyboard actions.
-- The agent-facing `SKILL.md` is shorter; detailed contracts and troubleshooting stay here.
+- File/folder/reveal paths now require an absolute target and distinguish empty, relative, missing, inaccessible, wrong-kind, and missing-association failures.
+- Direct file, folder, URL, and Explorer actions use a shell-only backend without loading PyAutoGUI, Pillow, screenshot, clipboard, or window modules.
+- Desktop, Documents, and Downloads come from the Windows Known Folder API, with fallback provenance reported explicitly.
+- Configured app launch falls back to the installed-app index only after a definite not-found failure; access denial or an accepted dispatch never fans out.
+- Standalone and sequence window commands share aliases, support `hwnd`/PID verification, and targeted input refuses to type until the exact target is foreground.
+- File/folder searches have root, depth, visited-entry, time, and generated-directory budgets and report incomplete results.
+- Sequence JSON can come from inline JSON, an absolute UTF-8 file, or stdin. Ordinary OS errors preserve partial completion.
+- CLI argument errors are JSON, `doctor` identifies the actual runtime, and successful shell dispatch is no longer described as completed document/page loading.
 
 The main rule is: **screenshot is fallback, not default**. Token savings come from fewer images, smaller visual scope, fewer model/tool turns, and deterministic actions—not from guessing at image compression ratios.
 
@@ -41,16 +44,19 @@ py -3.13 -m pip install --upgrade pip
 py -3.13 -m pip install -r requirements.txt
 ```
 
-Verify the configuration without moving the pointer or opening an app:
+Resolve the runtime once and verify it without moving the pointer or opening an app:
 
 ```powershell
-py -3.13 scripts/lcu_tools.py list_apps
+$LcuRoot = (Resolve-Path .).Path
+$Lcu = Join-Path $LcuRoot "scripts\lcu_tools.py"
+py -3.13 "$Lcu" doctor
+py -3.13 "$Lcu" list_apps
 ```
 
 Expected shape:
 
 ```json
-{"ok":true,"action":"list_apps","result":{"apps":["chrome","Discord"],"registeredCount":19,"indexedCount":42,"cacheRefreshed":true},"meta":{"durationMs":18.234}}
+{"ok":true,"action":"list_apps","result":{"apps":["chrome","Discord"],"configured":[{"name":"chrome","configured":true,"installedVerified":false}],"indexed":[{"name":"Discord","source":"app-paths","process":"discord.exe"}],"registeredCount":19,"indexedCount":42,"cacheRefreshed":true},"meta":{"durationMs":18.234,"requestId":"..."}}
 ```
 
 Every invocation prints exactly one JSON object. Expected failures exit with code `2`; unexpected failures exit with code `3`.
@@ -92,46 +98,53 @@ The checked-in adapters also support repository-scoped discovery:
 
 ## Primitive examples
 
-Run commands from the skill root so the bundled configuration is resolved independently of the host agent's working directory.
+Always invoke the script with its resolved absolute path so a host's current working directory cannot select a different script or config.
+
+```powershell
+$LcuRoot = (Resolve-Path "C:\Users\<USER>\.gemini\antigravity\skills\lite-computer-use").Path
+$Lcu = Join-Path $LcuRoot "scripts\lcu_tools.py"
+```
 
 ```powershell
 # Observe
-py -3.13 scripts/lcu_tools.py screenshot
-py -3.13 scripts/lcu_tools.py screenshot --active-window --scale 0.5
-py -3.13 scripts/lcu_tools.py screenshot --region 500 300 800 600
-py -3.13 scripts/lcu_tools.py get_active_window
-py -3.13 scripts/lcu_tools.py list_windows
-py -3.13 scripts/lcu_tools.py get_mouse_position
+py -3.13 "$Lcu" screenshot
+py -3.13 "$Lcu" screenshot --active-window --scale 0.5
+py -3.13 "$Lcu" screenshot --region 500 300 800 600
+py -3.13 "$Lcu" get_active_window
+py -3.13 "$Lcu" list_windows
+py -3.13 "$Lcu" get_mouse_position
 
 # Mouse and keyboard
-py -3.13 scripts/lcu_tools.py move_mouse 500 400
-py -3.13 scripts/lcu_tools.py click 500 400 --button right
-py -3.13 scripts/lcu_tools.py double_click 500 400
-py -3.13 scripts/lcu_tools.py drag 100 100 500 500 --duration 0.7
-py -3.13 scripts/lcu_tools.py scroll -5
-py -3.13 scripts/lcu_tools.py type_text "OpenAI 테스트"
-py -3.13 scripts/lcu_tools.py press_key TAB --count 4
-py -3.13 scripts/lcu_tools.py hotkey CTRL L
+py -3.13 "$Lcu" move_mouse 500 400
+py -3.13 "$Lcu" click 500 400 --button right
+py -3.13 "$Lcu" double_click 500 400
+py -3.13 "$Lcu" drag 100 100 500 500 --duration 0.7
+py -3.13 "$Lcu" scroll -5
+py -3.13 "$Lcu" type_text "OpenAI 테스트" --target "메모장"
+py -3.13 "$Lcu" press_key TAB --count 4 --target "메모장"
+py -3.13 "$Lcu" hotkey CTRL L --target "크롬"
 
 # Window control and bounded waiting
-py -3.13 scripts/lcu_tools.py focus_window "Chrome"
-py -3.13 scripts/lcu_tools.py set_window_state "Chrome" maximize
-py -3.13 scripts/lcu_tools.py set_window_bounds "Chrome" 0 0 960 1080
-py -3.13 scripts/lcu_tools.py wait_for_window "Calculator" --state active --timeout 10
-py -3.13 scripts/lcu_tools.py close_window "Notepad"
+py -3.13 "$Lcu" focus_window "Chrome"
+py -3.13 "$Lcu" set_window_state "Chrome" maximize
+py -3.13 "$Lcu" set_window_bounds "Chrome" 0 0 960 1080
+py -3.13 "$Lcu" wait_for_window "Calculator" --state active --timeout 10
+py -3.13 "$Lcu" close_window "Notepad"
 
 # Apps, web, files, and folders
-py -3.13 scripts/lcu_tools.py list_apps
-py -3.13 scripts/lcu_tools.py list_apps --refresh
-py -3.13 scripts/lcu_tools.py launch_app chrome
-py -3.13 scripts/lcu_tools.py open_url "https://www.naver.com"
-py -3.13 scripts/lcu_tools.py find_file "contract" --limit 10
-py -3.13 scripts/lcu_tools.py open_file "C:\Users\me\Downloads\contract.pdf"
-py -3.13 scripts/lcu_tools.py open_folder "C:\Users\me\Downloads"
-py -3.13 scripts/lcu_tools.py reveal_file "C:\Users\me\Downloads\contract.pdf"
+py -3.13 "$Lcu" list_apps
+py -3.13 "$Lcu" list_apps --refresh
+py -3.13 "$Lcu" launch_app chrome
+py -3.13 "$Lcu" open_url "https://www.naver.com"
+py -3.13 "$Lcu" known_folder downloads
+py -3.13 "$Lcu" find_file "contract" --root "C:\Users\me\Downloads" --limit 10
+py -3.13 "$Lcu" find_folder "project" --root "C:\Users\me\Documents"
+py -3.13 "$Lcu" open_file "C:\Users\me\Downloads\contract.pdf"
+py -3.13 "$Lcu" open_folder "C:\Users\me\Downloads"
+py -3.13 "$Lcu" reveal_file "C:\Users\me\Downloads\contract.pdf"
 
 # Bounded deterministic sequence
-py -3.13 scripts/lcu_tools.py sequence --json '[{"action":"focus_window","title":"Chrome"},{"action":"hotkey","keys":["CTRL","L"]},{"action":"type_text","text":"OpenAI"},{"action":"press_key","key":"ENTER"}]'
+py -3.13 "$Lcu" sequence --json '[{"action":"focus_window","title":"Chrome"},{"action":"hotkey","keys":["CTRL","L"],"target":"Chrome"},{"action":"type_text","text":"OpenAI","target":"Chrome"},{"action":"press_key","key":"ENTER","target":"Chrome"}]'
 ```
 
 `reveal_file` selects a file in Explorer without opening it. `close_window` posts a normal close request; it never force-kills the process, so the application's own unsaved-document dialog remains in control.
@@ -139,8 +152,8 @@ py -3.13 scripts/lcu_tools.py sequence --json '[{"action":"focus_window","title"
 For coordinates obtained from an active-window screenshot, use the same cropped coordinate space:
 
 ```powershell
-py -3.13 scripts/lcu_tools.py click 420 260 --relative-to active-window
-py -3.13 scripts/lcu_tools.py drag 100 100 500 500 --relative-to active-window
+py -3.13 "$Lcu" click 420 260 --relative-to active-window
+py -3.13 "$Lcu" drag 100 100 500 500 --relative-to active-window
 ```
 
 Negative screen coordinates are valid on monitors located left of or above the primary monitor. Region screenshots, pointer actions, and window bounds are checked against the full Windows virtual desktop. Move the pointer to the upper-left fail-safe corner to abort a PyAutoGUI mouse or keyboard action.
@@ -204,10 +217,11 @@ Allowed actions:
 Rules:
 
 - The JSON value must be an array containing 1–8 action objects.
+- Supply exactly one of inline `--json`, absolute UTF-8 `--file`, or `--stdin`.
 - Every step and field is validated before execution begins.
 - Steps run in order and stop on the first LCU error.
 - There are no conditions, branches, loops, retries, screenshots, clipboard or file actions, drags, double-clicks, or arbitrary Python/shell execution.
-- A failure exits with code `2`; `result.completed`, `result.failedIndex`, and ordered prior results describe partial execution.
+- A failure exits with code `2`; `result.completed`, `result.failedIndex`, `result.failedAction`, `result.partialEffectPossible`, and ordered prior results describe partial execution. A failed input/click/launch step may have a partial side effect even when `completed` is zero.
 
 Example success:
 
@@ -236,12 +250,12 @@ The Python layer is not an autonomous agent. `wait_for_window` is only bounded p
 Use `--interval` only for an application that demonstrably drops fast input:
 
 ```powershell
-py -3.13 scripts/lcu_tools.py type_text "한글 입력 테스트" --interval 0.01
+py -3.13 "$Lcu" type_text "한글 입력 테스트" --target "메모장" --interval 0.01
 ```
 
 ## App configuration
 
-Trusted app aliases and launch commands live in `config/apps.yaml`. They have exact-match priority. When no configured alias matches, `launch_app` checks an installed-app index built from Start Menu `.lnk` files and the current-user/machine Windows App Paths registry keys. Exact indexed names win; a partial name or process match must be unique or returns `ambiguous_app`.
+Trusted app aliases and launch commands live in `config/apps.yaml`. They have exact-match priority. When no configured alias matches, `launch_app` checks an installed-app index built from Start Menu `.lnk` files and 32/64-bit current-user/machine Windows App Paths registry views. If a configured command fails with a definite not-found error, its canonical name, aliases, and executable basename may resolve the same app in the index once. Access denial, ambiguity, or an already accepted OS request never triggers candidate fan-out. Exact indexed names win; a partial name or process match must be unique or returns `ambiguous_app`.
 
 ```yaml
 apps:
@@ -252,13 +266,21 @@ apps:
 
 The index is cached at `%LOCALAPPDATA%\LiteComputerUse\cache\apps.json` for 24 hours. `list_apps` uses the cache; run `list_apps --refresh` after installing, removing, or renaming apps. Discovery happens only during a command—there is no watcher, daemon, or background refresh. Public results and logs omit executable and shortcut paths, and there is still no arbitrary command or shell-execution primitive.
 
+Store/protocol apps can be launched when a trusted protocol such as `ms-settings:` is configured or when Windows exposes a usable Start Menu shortcut. Packaged apps with neither a shortcut nor an App Paths entry are outside automatic discovery. Multiple side-by-side installations remain ambiguous unless the configured alias identifies one exact command.
+
 ## Window resolution
 
-`list_windows` returns visible titled windows with `pid` and a lowercase process basename such as `chrome.exe`; process lookup failures return `null` without aborting enumeration. Full executable paths are never returned. Window actions resolve in this order: exact title, exact configured app/process alias, partial title, then partial process. An active match breaks a tie; otherwise multiple matches return `ambiguous_window`.
+`list_windows` returns visible titled windows with `hwnd`, `pid`, and a lowercase process basename such as `chrome.exe`; process lookup failures return `null` without aborting enumeration. Full executable paths are never returned. Window actions resolve in this order: exact title, exact configured app/process alias, partial title, then partial process. An active match may break a low-impact focus/wait tie; `close_window` rejects ambiguity. Follow-up actions can use `--hwnd` and optional `--pid`; a stale handle or PID mismatch is never replaced silently.
+
+`wait_for_window --state present` confirms presence only. Use `focus_window`, `--target`, or `--hwnd` before keyboard input. Targeted input waits for the requested handle to become the real foreground window and sends nothing when focus verification fails.
+
+`os.startfile`/ShellExecute-style launches do not return a reliable PID, and a single-instance app may activate an existing process. A successful launch therefore remains `dispatch_accepted`/`unverified`; use the resolver and returned window handle for explicit follow-up verification.
 
 ## Files and folders
 
-`find_file` searches the current user's Desktop, Downloads, and Documents folders, including available OneDrive Desktop and Documents locations. It performs a case-insensitive partial filename match, sorts by modification time, and limits results to 1–100. The host must ask when several returned files remain plausible; newest does not mean correct.
+`known_folder` resolves Desktop, Documents, and Downloads through the Windows Known Folder API and reports whether a fallback was used. This handles localized and redirected folders without guessing a profile or OneDrive path.
+
+`find_file` and `find_folder` perform case-insensitive partial-name searches. With no `--root`, they use the existing known folders; with an explicit absolute root they never add another location. Defaults are 3 seconds, depth 6, 20,000 visited entries, and common generated-directory exclusions such as `.git`, `.venv`, `node_modules`, and `build`. Results include roots, elapsed time, visited count, `truncated`/`incomplete`, and stop reason. Modification ordering applies only to the collected budget. UNC traversal is cooperative and cannot guarantee a hard timeout while an individual network filesystem call is blocked.
 
 `open_file` opens an exact existing normal document through its Windows file association. It rejects executables, installers, scripts, shortcuts, registry files, disk images, and other launch-capable extensions. `open_folder` validates and opens a directory. `reveal_file` opens Explorer with an existing file selected without launching that file. There are no delete, rename, move, copy, create, or overwrite primitives.
 
@@ -276,7 +298,7 @@ The installed-app cache is stored under `%LOCALAPPDATA%\LiteComputerUse\cache` a
 
 Redacted action logs are stored at `%LOCALAPPDATA%\LiteComputerUse\logs\actions.jsonl`. Each entry records UTC time, action name, success, minimal redacted metadata, and non-negative `durationMs`. Typed text, clipboard text, complete paths, complete URLs, complete window titles, and screenshot pixels are never logged. Sequence logs store only the JSON payload length.
 
-`durationMs` measures local execution after CLI argument parsing and includes action-lock acquisition. It is not the model's end-to-end latency and does not estimate host or vision tokens.
+`durationMs` measures local execution from argument-parser construction through the result and includes action-lock acquisition for mutating/UI actions. Read-only diagnostics and searches do not take that UI lock. Timing excludes Python process startup, is not the model's end-to-end latency, and does not estimate host or vision tokens. `requestId` links the redacted response and diagnostic log without storing a path, URL, title, or typed text.
 
 ## Safety
 
@@ -350,7 +372,8 @@ C:\Users\<USER>\.gemini\antigravity\skills\lite-computer-use\
 Then fully exit and restart Antigravity CLI. Test the runtime directly first:
 
 ```powershell
-py -3.13 scripts/lcu_tools.py list_apps
+py -3.13 "$Lcu" doctor
+py -3.13 "$Lcu" list_apps
 ```
 
 ## Tests

@@ -75,6 +75,24 @@ class SequenceValidationTests(unittest.TestCase):
         self.assertEqual("invalid_sequence_step", context.exception.code)
         backend.press_key.assert_not_called()
 
+    def test_validates_explicit_input_targets(self) -> None:
+        parsed = parse_sequence(
+            json.dumps(
+                [
+                    {"action": "focus_window", "hwnd": 77, "pid": 10},
+                    {"action": "type_text", "text": "한글", "hwnd": 77, "pid": 10},
+                ]
+            )
+        )
+        self.assertEqual(77, parsed[1]["hwnd"])
+        for step in (
+            {"action": "type_text", "text": "x", "target": "A", "hwnd": 1},
+            {"action": "focus_window", "title": "A", "hwnd": 1},
+            {"action": "press_key", "key": "A", "pid": 3},
+        ):
+            with self.subTest(step=step), self.assertRaises(LCUError):
+                parse_sequence(json.dumps([step]))
+
 
 class SequenceExecutionTests(unittest.TestCase):
     def test_runs_expanded_actions_in_order(self) -> None:
@@ -189,6 +207,43 @@ class SequenceExecutionTests(unittest.TestCase):
             "input_failed", payload["error"]["details"]["cause"]["code"]
         )
         self.assertGreaterEqual(payload["meta"]["durationMs"], 0)
+
+    def test_plain_os_error_preserves_completed_steps(self) -> None:
+        backend = Mock()
+        backend.press_key.side_effect = [
+            {"key": "tab", "count": 1},
+            OSError(5, "access denied"),
+        ]
+        value = json.dumps(
+            [
+                {"action": "press_key", "key": "TAB"},
+                {"action": "press_key", "key": "ENTER"},
+                {"action": "press_key", "key": "ESC"},
+            ]
+        )
+        with self.assertRaises(LCUError) as context:
+            run_sequence(backend, value)
+        details = context.exception.details
+        self.assertEqual(1, details["completed"])
+        self.assertEqual(1, details["failedIndex"])
+        self.assertEqual("os_error", details["cause"]["code"])
+        self.assertTrue(details["partialEffectPossible"])
+        self.assertEqual(2, backend.press_key.call_count)
+
+    def test_target_verification_failure_prevents_input(self) -> None:
+        backend = Mock()
+        backend.ensure_input_target.side_effect = LCUError(
+            "window_focus_unverified", "not foreground"
+        )
+        value = json.dumps(
+            [{"action": "type_text", "text": "do not send", "target": "Notepad"}]
+        )
+        with self.assertRaises(LCUError) as context:
+            run_sequence(backend, value)
+        self.assertEqual(
+            "window_focus_unverified", context.exception.details["cause"]["code"]
+        )
+        backend.type_text.assert_not_called()
 
 
 if __name__ == "__main__":

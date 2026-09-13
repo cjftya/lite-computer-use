@@ -44,8 +44,9 @@ class WindowsBackendSafetyTests(unittest.TestCase):
         self.assertEqual("not_a_folder", context.exception.code)
 
     def test_reveal_file_rejects_missing_target(self) -> None:
+        missing = Path(tempfile.gettempdir()) / "definitely-missing-lcu-test-file.pdf"
         with self.assertRaises(LCUError) as context:
-            WindowsBackend.reveal_file("definitely-missing-lcu-test-file.pdf")
+            WindowsBackend.reveal_file(str(missing))
         self.assertEqual("file_not_found", context.exception.code)
 
     def test_open_folder_and_reveal_file_use_explorer_without_opening_file(self) -> None:
@@ -53,12 +54,12 @@ class WindowsBackendSafetyTests(unittest.TestCase):
             folder = Path(temp_dir)
             file_path = folder / "document with spaces.pdf"
             file_path.write_text("test", encoding="utf-8")
-            with patch("windows_backend.os.startfile", create=True) as startfile:
+            with patch("direct_backend.os.startfile", create=True) as startfile:
                 result = WindowsBackend.open_folder(str(folder))
             startfile.assert_called_once_with(str(folder.resolve()))
             self.assertEqual(str(folder.resolve()), result["path"])
 
-            with patch("windows_backend.subprocess.Popen") as popen:
+            with patch("direct_backend.subprocess.Popen") as popen:
                 result = WindowsBackend.reveal_file(str(file_path))
             popen.assert_called_once_with(
                 ["explorer.exe", f"/select,{file_path.resolve()}"], close_fds=True
@@ -357,6 +358,55 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
             backend._resolve_window("chrome")
         self.assertEqual("window_not_found", context.exception.code)
 
+    def test_window_handle_validates_pid_and_does_not_retarget(self) -> None:
+        backend = self.make_backend()
+        backend.list_windows = Mock(
+            return_value=[
+                {"hwnd": 7, "title": "A", "pid": 10, "active": False},
+                {"hwnd": 8, "title": "B", "pid": 11, "active": True},
+            ]
+        )
+        self.assertEqual(7, backend._resolve_window(hwnd=7, expected_pid=10)["hwnd"])
+        with self.assertRaises(LCUError) as mismatch:
+            backend._resolve_window(hwnd=7, expected_pid=11)
+        self.assertEqual("window_pid_mismatch", mismatch.exception.code)
+        with self.assertRaises(LCUError) as stale:
+            backend._resolve_window(hwnd=99)
+        self.assertEqual("stale_window_handle", stale.exception.code)
+
+    def test_focus_requires_actual_foreground_before_input(self) -> None:
+        backend = self.make_backend()
+        backend._resolve_window = Mock(
+            return_value={"hwnd": 7, "title": "Notepad", "pid": 10}
+        )
+        backend.win32gui.IsIconic.return_value = False
+        backend.win32gui.GetForegroundWindow.return_value = 8
+        with self.assertRaises(LCUError) as context:
+            backend.focus_window("Notepad", timeout=0)
+        self.assertEqual("window_focus_unverified", context.exception.code)
+
+    def test_targeted_input_reuses_already_foreground_window(self) -> None:
+        backend = self.make_backend()
+        backend._resolve_window = Mock(
+            return_value={"hwnd": 7, "title": "Notepad", "pid": 10}
+        )
+        backend.win32gui.GetForegroundWindow.return_value = 7
+        result = backend.ensure_input_target("Notepad")
+        self.assertFalse(result["focusChanged"])
+        backend.win32gui.SetForegroundWindow.assert_not_called()
+
+    def test_close_rejects_ambiguous_targets_even_if_one_is_active(self) -> None:
+        backend = self.make_backend()
+        backend.list_windows = Mock(
+            return_value=[
+                {"hwnd": 7, "title": "Notes A", "pid": 10, "process": "notepad.exe", "active": True},
+                {"hwnd": 8, "title": "Notes B", "pid": 10, "process": "notepad.exe", "active": False},
+            ]
+        )
+        with self.assertRaises(LCUError) as context:
+            backend.close_window("Notes")
+        self.assertEqual("ambiguous_window", context.exception.code)
+
     def test_set_window_bounds_supports_negative_monitor(self) -> None:
         backend = self.make_backend()
         backend._resolve_window = Mock(
@@ -427,7 +477,21 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
 
         result = backend.launch_app(app)
 
-        self.assertEqual({"name": "Discord", "source": "app-paths"}, result)
+        self.assertEqual("Discord", result["name"])
+        self.assertEqual("app-paths", result["source"])
+        self.assertEqual("dispatch_accepted", result["status"])
+        self.assertFalse(result["osStateVerified"])
+
+    def test_launch_failure_marks_only_definite_not_found_as_retryable(self) -> None:
+        backend = self.make_backend()
+        app = AppDefinition("missing", (), ("first.exe", "second.exe"))
+        backend._launch_command = Mock(
+            side_effect=[FileNotFoundError(2, "missing"), PermissionError(5, "denied")]
+        )
+        with self.assertRaises(LCUError) as context:
+            backend.launch_app(app)
+        self.assertFalse(context.exception.details["notFoundOnly"])
+        self.assertFalse(context.exception.details["retryable"])
 
 
 if __name__ == "__main__":

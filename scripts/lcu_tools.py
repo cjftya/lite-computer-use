@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import platform
 import sys
 import time
 import traceback
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -36,20 +39,33 @@ from helpers import (
     AppRegistry,
     LCUError,
     append_action_log,
-    default_search_roots,
-    find_files,
+    known_folders,
     normalize_name,
     safe_log_details,
+    search_entries,
 )
 from app_index import AppIndex
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "apps.yaml"
+VERSION = "1.4.0"
+MAX_SEQUENCE_CHARS = 100_000
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise LCUError(
+            "invalid_arguments",
+            message,
+            stage="parse",
+            retryable=False,
+            nextAction="check_help",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = JsonArgumentParser(
         prog="lcu_tools",
         description="Small, JSON-speaking Windows primitives for AI coding agents.",
     )
@@ -119,13 +135,16 @@ def build_parser() -> argparse.ArgumentParser:
     type_text = subparsers.add_parser("type_text", aliases=["type-text"])
     type_text.add_argument("text")
     type_text.add_argument("--interval", type=float, default=0.0)
+    _add_input_target(type_text)
 
     press_key = subparsers.add_parser("press_key", aliases=["press-key"])
     press_key.add_argument("key")
     press_key.add_argument("--count", type=int, default=1)
+    _add_input_target(press_key)
 
     hotkey = subparsers.add_parser("hotkey")
     hotkey.add_argument("keys", nargs="+")
+    _add_input_target(hotkey)
 
     launch_app = subparsers.add_parser("launch_app", aliases=["launch-app"])
     launch_app.add_argument("name")
@@ -136,46 +155,70 @@ def build_parser() -> argparse.ArgumentParser:
     open_folder = subparsers.add_parser("open_folder", aliases=["open-folder"])
     open_folder.add_argument("path")
 
+    known_folder = subparsers.add_parser(
+        "known_folder", aliases=["known-folder"], help="Resolve a Windows known folder"
+    )
+    known_folder.add_argument("name")
+    known_folder.add_argument("--open", action="store_true", dest="open_folder")
+
     reveal_file = subparsers.add_parser("reveal_file", aliases=["reveal-file"])
     reveal_file.add_argument("path")
 
     open_url = subparsers.add_parser("open_url", aliases=["open-url"])
     open_url.add_argument("url")
 
-    find_file = subparsers.add_parser("find_file", aliases=["find-file"])
-    find_file.add_argument("query")
-    find_file.add_argument("--limit", type=int, default=20)
+    for command, aliases, kind in (
+        ("find_file", ["find-file"], "file"),
+        ("find_folder", ["find-folder"], "folder"),
+    ):
+        search = subparsers.add_parser(command, aliases=aliases)
+        search.add_argument("query")
+        search.add_argument("--root", action="append", type=Path)
+        search.add_argument("--limit", type=int, default=20)
+        search.add_argument("--max-depth", type=int, default=6)
+        search.add_argument("--max-visited", type=int, default=20_000)
+        search.add_argument("--timeout", type=float, default=3.0)
+        search.add_argument("--include-ignored", action="store_true")
+        search.set_defaults(search_kind=kind)
 
     subparsers.add_parser("list_windows", aliases=["list-windows"])
     subparsers.add_parser("get_active_window", aliases=["get-active-window"])
 
     focus_window = subparsers.add_parser("focus_window", aliases=["focus-window"])
-    focus_window.add_argument("title")
+    _add_window_target(focus_window)
 
     set_window_state = subparsers.add_parser(
         "set_window_state", aliases=["set-window-state"]
     )
-    set_window_state.add_argument("title")
+    set_window_state.add_argument("title", nargs="?")
     set_window_state.add_argument(
-        "state", choices=("restore", "minimize", "maximize")
+        "state", nargs="?", choices=("restore", "minimize", "maximize")
+    )
+    set_window_state.add_argument("--hwnd", type=int)
+    set_window_state.add_argument("--pid", type=int)
+    set_window_state.add_argument(
+        "--value", dest="state_option", choices=("restore", "minimize", "maximize")
     )
 
     set_window_bounds = subparsers.add_parser(
         "set_window_bounds", aliases=["set-window-bounds"]
     )
-    set_window_bounds.add_argument("title")
-    set_window_bounds.add_argument("x", type=int)
-    set_window_bounds.add_argument("y", type=int)
-    set_window_bounds.add_argument("width", type=int)
-    set_window_bounds.add_argument("height", type=int)
+    set_window_bounds.add_argument("title", nargs="?")
+    set_window_bounds.add_argument("x", nargs="?", type=int)
+    set_window_bounds.add_argument("y", nargs="?", type=int)
+    set_window_bounds.add_argument("width", nargs="?", type=int)
+    set_window_bounds.add_argument("height", nargs="?", type=int)
+    set_window_bounds.add_argument("--hwnd", type=int)
+    set_window_bounds.add_argument("--pid", type=int)
+    set_window_bounds.add_argument("--bounds", nargs=4, type=int)
 
     close_window = subparsers.add_parser("close_window", aliases=["close-window"])
-    close_window.add_argument("title")
+    _add_window_target(close_window)
 
     wait_for_window = subparsers.add_parser(
         "wait_for_window", aliases=["wait-for-window"]
     )
-    wait_for_window.add_argument("title")
+    _add_window_target(wait_for_window)
     wait_for_window.add_argument(
         "--state", choices=("present", "gone", "active"), default="present"
     )
@@ -193,8 +236,27 @@ def build_parser() -> argparse.ArgumentParser:
     sequence = subparsers.add_parser(
         "sequence", help="Run up to eight safe deterministic actions"
     )
-    sequence.add_argument("--json", dest="sequence_json", required=True)
+    sequence_input = sequence.add_mutually_exclusive_group(required=True)
+    sequence_input.add_argument("--json", dest="sequence_json")
+    sequence_input.add_argument("--file", dest="sequence_file", type=Path)
+    sequence_input.add_argument("--stdin", dest="sequence_stdin", action="store_true")
+
+    subparsers.add_parser("doctor", help="Report runtime and dependency diagnostics")
     return parser
+
+
+def _add_window_target(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("title", nargs="?")
+    group.add_argument("--hwnd", type=int)
+    parser.add_argument("--pid", type=int)
+
+
+def _add_input_target(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--target")
+    group.add_argument("--hwnd", type=int)
+    parser.add_argument("--pid", type=int)
 
 
 def normalized_action(action: str) -> str:
@@ -209,6 +271,14 @@ def windows_backend(registry: AppRegistry | None = None) -> Any:
     return WindowsBackend(app_registry=registry)
 
 
+def direct_backend() -> Any:
+    if os.name != "nt":
+        raise LCUError("unsupported_platform", "Lite Computer Use requires Windows")
+    from direct_backend import DirectWindowsBackend
+
+    return DirectWindowsBackend()
+
+
 def resolve_app(
     registry: AppRegistry, query: str, index: AppIndex | None = None
 ) -> AppDefinition:
@@ -220,37 +290,198 @@ def resolve_app(
     return (index or AppIndex.load()).resolve(query)
 
 
+def launch_app_resilient(
+    backend: Any, registry: AppRegistry, query: str
+) -> dict[str, Any]:
+    try:
+        configured = registry.resolve(query)
+    except LCUError as exc:
+        if exc.code != "app_not_registered":
+            raise
+        index = AppIndex.load()
+        app = index.resolve(query)
+        try:
+            return backend.launch_app(app)
+        except LCUError as launch_error:
+            if (
+                launch_error.code != "app_launch_failed"
+                or not launch_error.details.get("notFoundOnly")
+                or index.refreshed
+            ):
+                raise
+            refreshed = AppIndex.load(refresh=True)
+            return backend.launch_app(refreshed.resolve(query))
+
+    try:
+        return backend.launch_app(configured)
+    except LCUError as launch_error:
+        if (
+            launch_error.code != "app_launch_failed"
+            or not launch_error.details.get("notFoundOnly")
+        ):
+            raise
+        # Only a definite not-found failure may fall back. Access denial or an
+        # accepted Shell request must never fan out into multiple app launches.
+        index = AppIndex.load()
+        indexed = index.resolve_any(registry.lookup_terms_for(query))
+        try:
+            result = backend.launch_app(indexed)
+        except LCUError as indexed_error:
+            if (
+                indexed_error.code != "app_launch_failed"
+                or not indexed_error.details.get("notFoundOnly")
+                or index.refreshed
+            ):
+                raise
+            indexed = AppIndex.load(refresh=True).resolve_any(
+                registry.lookup_terms_for(query)
+            )
+            result = backend.launch_app(indexed)
+        result["fallbackFrom"] = "registry-not-found"
+        return result
+
+
+def _doctor(config: Path) -> dict[str, Any]:
+    dependencies = {
+        name: importlib.util.find_spec(name) is not None
+        for name in ("yaml", "pyautogui", "PIL", "win32gui", "win32clipboard")
+    }
+    gui_ready = os.name == "nt" and all(dependencies.values())
+    return {
+        "version": VERSION,
+        "python": {
+            "version": platform.python_version(),
+            "executable": sys.executable,
+            "supported": sys.version_info >= (3, 11),
+        },
+        "platform": {"system": platform.system(), "release": platform.release()},
+        "runtime": {
+            "projectRoot": str(PROJECT_ROOT),
+            "scriptPath": str(Path(__file__).resolve()),
+            "configPath": str(config.expanduser().resolve(strict=False)),
+        },
+        "dependencies": dependencies,
+        "directActionsReady": os.name == "nt" and dependencies["yaml"],
+        "guiActionsReady": gui_ready,
+        "ready": gui_ready,
+        "note": "Internal timing excludes Python process startup time",
+    }
+
+
 def run_action(args: argparse.Namespace) -> Any:
     action = normalized_action(args.action)
+    sequence_text: str | None = None
 
-    if action == "find_file":
-        roots = default_search_roots()
-        return {
-            "query": args.query,
-            "roots": [str(root) for root in roots],
-            "matches": find_files(args.query, roots, args.limit),
-        }
+    args.config = args.config.expanduser()
+    if not args.config.is_absolute():
+        raise LCUError(
+            "relative_path_not_allowed",
+            "App config path must be absolute",
+            stage="validate_config",
+            retryable=False,
+            nextAction="provide_absolute_config_path",
+        )
+
+    if action == "sequence":
+        sequence_text = read_sequence_input(args)
+        parse_sequence(sequence_text)
+
+    if action == "doctor":
+        return _doctor(args.config)
+
+    if action in {"find_file", "find_folder"}:
+        root_sources: list[dict[str, Any]] | None = None
+        if args.root is not None:
+            roots = args.root
+        else:
+            folders = known_folders()
+            root_sources = [
+                {"name": name, **details}
+                for name, details in folders.items()
+                if details["exists"]
+            ]
+            roots = [Path(item["path"]) for item in root_sources]
+        result = search_entries(
+            args.query,
+            roots,
+            args.limit,
+            kind=args.search_kind,
+            max_depth=args.max_depth,
+            max_visited=args.max_visited,
+            timeout=args.timeout,
+            include_ignored=args.include_ignored,
+            strict_roots=args.root is not None,
+        )
+        response = {"query": args.query, "kind": args.search_kind, **result}
+        if root_sources is not None:
+            response["rootSources"] = root_sources
+        return response
+
+    if action in {"open_file", "open_folder", "reveal_file", "open_url", "known_folder"}:
+        backend = direct_backend()
+        if action == "known_folder":
+            result = backend.known_folder(args.name)
+            if args.open_folder:
+                result["openResult"] = backend.open_folder(result["path"])
+            return result
+        value = args.url if action == "open_url" else args.path
+        return getattr(backend, action)(value)
 
     registry: AppRegistry | None = None
-    if action in {"launch_app", "list_apps", "sequence"}:
+    needs_registry = action in {
+        "launch_app",
+        "list_apps",
+        "sequence",
+        "focus_window",
+        "wait_for_window",
+        "set_window_state",
+        "set_window_bounds",
+        "close_window",
+    } or (
+        action in {"type_text", "press_key", "hotkey"}
+        and getattr(args, "target", None) is not None
+    )
+    if needs_registry:
         registry = AppRegistry.load(args.config)
     if action == "list_apps":
         assert registry is not None
         registered_names = registry.names()
+        configured = [
+            {"name": definition.name, "configured": True, "installedVerified": False}
+            for definition in registry.definitions()
+        ]
         if os.name != "nt":
             return {
                 "apps": registered_names,
+                "configured": configured,
+                "indexed": [],
                 "registeredCount": len(registered_names),
                 "indexedCount": 0,
                 "cacheRefreshed": False,
             }
         index = AppIndex.load(refresh=args.refresh)
+        for item, definition in zip(configured, registry.definitions(), strict=True):
+            try:
+                installed = index.resolve_any(
+                    registry.lookup_terms_for(definition.name)
+                )
+            except LCUError:
+                continue
+            item.update(
+                {
+                    "installedVerified": True,
+                    "indexedName": installed.name,
+                    "indexedSource": installed.source,
+                }
+            )
         names_by_key = {normalize_name(name): name for name in registered_names}
         for indexed_app in index.apps:
             names_by_key.setdefault(indexed_app.normalized, indexed_app.name)
         names = sorted(names_by_key.values(), key=str.casefold)
         return {
             "apps": names,
+            "configured": configured,
+            "indexed": index.public_apps(),
             "registeredCount": len(registered_names),
             "indexedCount": len(index.apps),
             "cacheRefreshed": index.refreshed,
@@ -259,7 +490,8 @@ def run_action(args: argparse.Namespace) -> Any:
     backend = windows_backend(registry)
     if action == "sequence":
         assert registry is not None
-        return run_sequence(backend, args.sequence_json, registry)
+        assert sequence_text is not None
+        return run_sequence(backend, sequence_text, registry)
     dispatch: dict[str, Callable[[], Any]] = {
         "screenshot": lambda: _screenshot(backend, args),
         "click": lambda: backend.click(
@@ -279,31 +511,31 @@ def run_action(args: argparse.Namespace) -> Any:
             args.relative_to,
         ),
         "scroll": lambda: backend.scroll(args.amount),
-        "type_text": lambda: backend.type_text(args.text, args.interval),
-        "press_key": lambda: backend.press_key(args.key, args.count),
-        "hotkey": lambda: backend.hotkey(args.keys),
-        "open_file": lambda: backend.open_file(args.path),
-        "open_folder": lambda: backend.open_folder(args.path),
-        "reveal_file": lambda: backend.reveal_file(args.path),
-        "open_url": lambda: backend.open_url(args.url),
+        "type_text": lambda: _targeted_input(
+            backend, args, lambda: backend.type_text(args.text, args.interval)
+        ),
+        "press_key": lambda: _targeted_input(
+            backend, args, lambda: backend.press_key(args.key, args.count)
+        ),
+        "hotkey": lambda: _targeted_input(
+            backend, args, lambda: backend.hotkey(args.keys)
+        ),
         "list_windows": backend.list_windows,
         "get_active_window": backend.active_window,
         "get_mouse_position": backend.get_mouse_position,
-        "focus_window": lambda: backend.focus_window(args.title),
-        "set_window_state": lambda: backend.set_window_state(args.title, args.state),
-        "set_window_bounds": lambda: backend.set_window_bounds(
-            args.title, args.x, args.y, args.width, args.height
-        ),
-        "close_window": lambda: backend.close_window(args.title),
+        "focus_window": lambda: backend.focus_window(args.title, args.hwnd, args.pid),
+        "set_window_state": lambda: _set_window_state(backend, args),
+        "set_window_bounds": lambda: _set_window_bounds(backend, args),
+        "close_window": lambda: backend.close_window(args.title, args.hwnd, args.pid),
         "wait_for_window": lambda: backend.wait_for_window(
-            args.title, args.state, args.timeout
+            args.title, args.state, args.timeout, args.hwnd, args.pid
         ),
         "set_clipboard": lambda: backend.set_clipboard(args.text),
         "get_clipboard": backend.get_clipboard,
     }
     if action == "launch_app":
         assert registry is not None
-        return backend.launch_app(resolve_app(registry, args.name))
+        return launch_app_resilient(backend, registry, args.name)
     try:
         callback = dispatch[action]
     except KeyError as exc:
@@ -311,21 +543,133 @@ def run_action(args: argparse.Namespace) -> Any:
     return callback()
 
 
+def _targeted_input(
+    backend: Any, args: argparse.Namespace, callback: Callable[[], Any]
+) -> Any:
+    return _with_verified_input_target(
+        backend,
+        getattr(args, "target", None),
+        getattr(args, "hwnd", None),
+        getattr(args, "pid", None),
+        callback,
+    )
+
+
+def _with_verified_input_target(
+    backend: Any,
+    target: str | None,
+    hwnd: int | None,
+    pid: int | None,
+    callback: Callable[[], Any],
+) -> Any:
+    verified: dict[str, Any] | None = None
+    if target is not None or hwnd is not None:
+        verified = backend.ensure_input_target(target, hwnd, pid)
+    result = callback()
+    if verified is not None and isinstance(result, dict):
+        result = dict(result)
+        result["target"] = {
+            "hwnd": verified["hwnd"],
+            "pid": verified.get("pid"),
+            "foregroundVerified": True,
+        }
+    return result
+
+
+def _validated_window_target(args: argparse.Namespace) -> tuple[str | None, int | None, int | None]:
+    title = getattr(args, "title", None)
+    hwnd = getattr(args, "hwnd", None)
+    pid = getattr(args, "pid", None)
+    if (title is None) == (hwnd is None):
+        raise LCUError(
+            "invalid_window_target",
+            "Provide exactly one of a window title or --hwnd",
+            stage="validate",
+            retryable=False,
+            nextAction="run_list_windows",
+        )
+    if title is not None and not title.strip():
+        raise LCUError("invalid_window_query", "Window title query cannot be empty")
+    if hwnd is not None and hwnd <= 0:
+        raise LCUError("invalid_window_handle", "Window handle must be positive")
+    if pid is not None and pid <= 0:
+        raise LCUError("invalid_process_id", "Process ID must be positive")
+    return title, hwnd, pid
+
+
+def _set_window_state(backend: Any, args: argparse.Namespace) -> Any:
+    title, hwnd, pid = _validated_window_target(args)
+    state = args.state_option or args.state
+    if state is None:
+        raise LCUError("invalid_window_state", "Window state is required")
+    return backend.set_window_state(title, state, hwnd, pid)
+
+
+def _set_window_bounds(backend: Any, args: argparse.Namespace) -> Any:
+    title, hwnd, pid = _validated_window_target(args)
+    positional = (args.x, args.y, args.width, args.height)
+    if args.bounds is not None and any(value is not None for value in positional):
+        raise LCUError("invalid_window_bounds", "Use positional bounds or --bounds, not both")
+    values = tuple(args.bounds) if args.bounds is not None else positional
+    if any(value is None for value in values):
+        raise LCUError("invalid_window_bounds", "Window x, y, width, and height are required")
+    x, y, width, height = values
+    return backend.set_window_bounds(title, x, y, width, height, hwnd, pid)
+
+
+def read_sequence_input(args: argparse.Namespace) -> str:
+    if args.sequence_json is not None:
+        value = args.sequence_json
+    elif args.sequence_file is not None:
+        path = args.sequence_file.expanduser()
+        if not path.is_absolute():
+            raise LCUError(
+                "relative_path_not_allowed",
+                "Sequence file path must be absolute",
+                stage="read_sequence",
+                retryable=False,
+            )
+        try:
+            if path.stat().st_size > MAX_SEQUENCE_CHARS * 4 + 4:
+                raise LCUError(
+                    "sequence_too_large",
+                    f"Sequence JSON is limited to {MAX_SEQUENCE_CHARS} characters",
+                )
+            value = path.read_text(encoding="utf-8-sig")
+        except FileNotFoundError as exc:
+            raise LCUError("sequence_file_not_found", "Sequence file does not exist") from exc
+        except UnicodeDecodeError as exc:
+            raise LCUError("sequence_encoding_invalid", "Sequence file must be UTF-8") from exc
+        except OSError as exc:
+            raise LCUError(
+                "sequence_file_read_failed",
+                "Could not read sequence file",
+                osError=getattr(exc, "winerror", None) or exc.errno,
+            ) from exc
+    else:
+        value = sys.stdin.read(MAX_SEQUENCE_CHARS + 1)
+    if len(value) > MAX_SEQUENCE_CHARS:
+        raise LCUError(
+            "sequence_too_large", f"Sequence JSON is limited to {MAX_SEQUENCE_CHARS} characters"
+        )
+    return value
+
+
 SEQUENCE_FIELDS: dict[str, set[str]] = {
     "launch_app": {"action", "name"},
-    "wait_for_window": {"action", "title", "state", "timeout"},
+    "wait_for_window": {"action", "title", "hwnd", "pid", "state", "timeout"},
     "click": {"action", "x", "y", "relative_to", "button"},
     "move_mouse": {"action", "x", "y", "relative_to"},
-    "focus_window": {"action", "title"},
-    "hotkey": {"action", "keys"},
-    "press_key": {"action", "key", "count"},
-    "type_text": {"action", "text", "interval"},
+    "focus_window": {"action", "title", "hwnd", "pid"},
+    "hotkey": {"action", "keys", "target", "hwnd", "pid"},
+    "press_key": {"action", "key", "count", "target", "hwnd", "pid"},
+    "type_text": {"action", "text", "interval", "target", "hwnd", "pid"},
     "scroll": {"action", "amount"},
 }
 
 
 def parse_sequence(value: str) -> list[dict[str, Any]]:
-    if len(value) > 100_000:
+    if len(value) > MAX_SEQUENCE_CHARS:
         raise LCUError(
             "sequence_too_large", "Sequence JSON is limited to 100,000 characters"
         )
@@ -404,11 +748,31 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
                 index=index,
             )
     elif action in {"focus_window", "wait_for_window"}:
-        require_string("title")
-        if not step["title"].strip():
+        title = step.get("title")
+        hwnd = step.get("hwnd")
+        if (title is None) == (hwnd is None):
             raise LCUError(
                 "invalid_sequence_step",
-                f"Sequence {action} title cannot be empty",
+                f"Sequence {action} requires exactly one of title or hwnd",
+                index=index,
+            )
+        if title is not None and (not isinstance(title, str) or not title.strip()):
+            raise LCUError(
+                "invalid_sequence_step",
+                f"Sequence {action} title must be a non-empty string",
+                index=index,
+            )
+        if hwnd is not None and (isinstance(hwnd, bool) or not isinstance(hwnd, int) or hwnd <= 0):
+            raise LCUError(
+                "invalid_sequence_step",
+                f"Sequence {action} hwnd must be a positive integer",
+                index=index,
+            )
+        pid = step.get("pid")
+        if pid is not None and (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0):
+            raise LCUError(
+                "invalid_sequence_step",
+                f"Sequence {action} pid must be a positive integer",
                 index=index,
             )
         if action == "wait_for_window":
@@ -459,6 +823,7 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
                 index=index,
             )
     elif action == "hotkey":
+        _validate_input_target(step, index)
         keys = step.get("keys")
         if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
             raise LCUError(
@@ -473,6 +838,7 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
                 index=index,
             )
     elif action == "press_key":
+        _validate_input_target(step, index)
         require_string("key")
         count = step.get("count", 1)
         if isinstance(count, bool) or not isinstance(count, int):
@@ -488,6 +854,7 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
                 index=index,
             )
     elif action == "type_text":
+        _validate_input_target(step, index)
         require_string("text")
         interval = step.get("interval", 0.0)
         if isinstance(interval, bool) or not isinstance(interval, (int, float)):
@@ -524,6 +891,42 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
             )
 
 
+def _validate_input_target(step: dict[str, Any], index: int) -> None:
+    target = step.get("target")
+    hwnd = step.get("hwnd")
+    if target is not None and hwnd is not None:
+        raise LCUError(
+            "invalid_sequence_step",
+            "Input target and hwnd are mutually exclusive",
+            index=index,
+        )
+    if target is not None and (not isinstance(target, str) or not target.strip()):
+        raise LCUError(
+            "invalid_sequence_step",
+            "Input target must be a non-empty string",
+            index=index,
+        )
+    if hwnd is not None and (isinstance(hwnd, bool) or not isinstance(hwnd, int) or hwnd <= 0):
+        raise LCUError(
+            "invalid_sequence_step",
+            "Input hwnd must be a positive integer",
+            index=index,
+        )
+    pid = step.get("pid")
+    if pid is not None and (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0):
+        raise LCUError(
+            "invalid_sequence_step",
+            "Input pid must be a positive integer",
+            index=index,
+        )
+    if pid is not None and target is None and hwnd is None:
+        raise LCUError(
+            "invalid_sequence_step",
+            "Input pid requires target or hwnd",
+            index=index,
+        )
+
+
 def run_sequence(
     backend: Any,
     sequence_json: str,
@@ -531,7 +934,6 @@ def run_sequence(
 ) -> dict[str, Any]:
     steps = parse_sequence(sequence_json)
     results: list[dict[str, Any]] = []
-    app_index: AppIndex | None = None
     for index, step in enumerate(steps):
         action = step["action"]
         try:
@@ -541,21 +943,22 @@ def run_sequence(
                         "config_not_loaded",
                         "App registry is required for sequence launch_app",
                     )
-                try:
-                    app = registry.resolve(step["name"])
-                except LCUError as exc:
-                    if exc.code != "app_not_registered":
-                        raise
-                    if app_index is None:
-                        app_index = AppIndex.load()
-                    app = app_index.resolve(step["name"])
-                result = backend.launch_app(app)
+                result = launch_app_resilient(backend, registry, step["name"])
             elif action == "wait_for_window":
-                result = backend.wait_for_window(
-                    step["title"],
-                    step.get("state", "present"),
-                    step.get("timeout", 10.0),
-                )
+                if step.get("hwnd") is None and step.get("pid") is None:
+                    result = backend.wait_for_window(
+                        step.get("title"),
+                        step.get("state", "present"),
+                        step.get("timeout", 10.0),
+                    )
+                else:
+                    result = backend.wait_for_window(
+                        step.get("title"),
+                        step.get("state", "present"),
+                        step.get("timeout", 10.0),
+                        step.get("hwnd"),
+                        step.get("pid"),
+                    )
             elif action == "click":
                 result = backend.click(
                     step["x"],
@@ -571,13 +974,38 @@ def run_sequence(
                     step.get("relative_to", "screen"),
                 )
             elif action == "focus_window":
-                result = backend.focus_window(step["title"])
+                if step.get("hwnd") is None and step.get("pid") is None:
+                    result = backend.focus_window(step.get("title"))
+                else:
+                    result = backend.focus_window(
+                        step.get("title"), step.get("hwnd"), step.get("pid")
+                    )
             elif action == "hotkey":
-                result = backend.hotkey(step["keys"])
+                result = _with_verified_input_target(
+                    backend,
+                    step.get("target"),
+                    step.get("hwnd"),
+                    step.get("pid"),
+                    lambda: backend.hotkey(step["keys"]),
+                )
             elif action == "press_key":
-                result = backend.press_key(step["key"], step.get("count", 1))
+                result = _with_verified_input_target(
+                    backend,
+                    step.get("target"),
+                    step.get("hwnd"),
+                    step.get("pid"),
+                    lambda: backend.press_key(step["key"], step.get("count", 1)),
+                )
             elif action == "type_text":
-                result = backend.type_text(step["text"], step.get("interval", 0.0))
+                result = _with_verified_input_target(
+                    backend,
+                    step.get("target"),
+                    step.get("hwnd"),
+                    step.get("pid"),
+                    lambda: backend.type_text(
+                        step["text"], step.get("interval", 0.0)
+                    ),
+                )
             elif action == "scroll":
                 result = backend.scroll(step["amount"])
             else:  # pragma: no cover - parse_sequence guarantees this set.
@@ -595,6 +1023,29 @@ def run_sequence(
                     "message": exc.message,
                     "details": exc.details,
                 },
+                partialEffectPossible=action
+                in {"launch_app", "click", "move_mouse", "hotkey", "press_key", "type_text", "scroll"},
+            ) from exc
+        except Exception as exc:  # Preserve partial completion for ordinary OS errors.
+            error_number = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+            raise LCUError(
+                "sequence_failed",
+                f"Sequence stopped at action index {index}",
+                completed=len(results),
+                failedIndex=index,
+                failedAction=action,
+                results=results,
+                cause={
+                    "code": "os_error" if isinstance(exc, OSError) else "unexpected_step_error",
+                    "message": str(exc),
+                    "details": {
+                        "stage": "execute_step",
+                        "osError": error_number,
+                        "retryable": False,
+                    },
+                },
+                partialEffectPossible=action
+                in {"launch_app", "click", "move_mouse", "hotkey", "press_key", "type_text", "scroll"},
             ) from exc
         results.append({"index": index, "action": action, "result": result})
     return {"completed": len(results), "results": results}
@@ -629,14 +1080,22 @@ def emit(payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    action = normalized_action(args.action)
-    details = safe_log_details(action, action_arguments(args))
     started = time.perf_counter()
+    request_id = uuid.uuid4().hex[:12]
+    args: argparse.Namespace | None = None
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    action = _action_hint(raw_argv)
+    details: dict[str, Any] = {"requestId": request_id}
     try:
-        with ActionLock():
+        parser = build_parser()
+        args = parser.parse_args(raw_argv)
+        action = normalized_action(args.action)
+        details.update(safe_log_details(action, action_arguments(args)))
+        if action in {"doctor", "find_file", "find_folder", "list_apps"}:
             result = run_action(args)
+        else:
+            with ActionLock():
+                result = run_action(args)
         duration_ms = round((time.perf_counter() - started) * 1000, 3)
         append_action_log(action, True, details, duration_ms)
         emit(
@@ -644,7 +1103,11 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": True,
                 "action": action,
                 "result": result,
-                "meta": {"durationMs": duration_ms},
+                "meta": {
+                    "durationMs": duration_ms,
+                    "requestId": request_id,
+                    "timingScope": "argument-parse-through-result; excludes-python-startup",
+                },
             }
         )
         return 0
@@ -662,16 +1125,26 @@ def main(argv: list[str] | None = None) -> int:
                 "message": exc.message,
                 "details": error_details,
             },
-            "meta": {"durationMs": duration_ms},
+            "meta": {
+                "durationMs": duration_ms,
+                "requestId": request_id,
+                "timingScope": "argument-parse-through-error; excludes-python-startup",
+            },
         }
         if action == "sequence" and exc.code == "sequence_failed":
             payload["result"] = {
                 key: exc.details[key]
-                for key in ("completed", "failedIndex", "failedAction", "results")
+                for key in (
+                    "completed",
+                    "failedIndex",
+                    "failedAction",
+                    "results",
+                    "partialEffectPossible",
+                )
             }
             payload["error"]["details"] = {"cause": exc.details["cause"]}
         emit(payload)
-        if args.debug:
+        if args is not None and args.debug:
             traceback.print_exc(file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - CLI boundary must always emit JSON.
@@ -691,12 +1164,32 @@ def main(argv: list[str] | None = None) -> int:
                     "message": str(exc),
                     "details": {},
                 },
-                "meta": {"durationMs": duration_ms},
+                "meta": {
+                    "durationMs": duration_ms,
+                    "requestId": request_id,
+                    "timingScope": "argument-parse-through-error; excludes-python-startup",
+                },
             }
         )
-        if args.debug:
+        if args is not None and args.debug:
             traceback.print_exc(file=sys.stderr)
         return 3
+
+
+def _action_hint(argv: list[str]) -> str:
+    value_options = {"--config"}
+    skip_next = False
+    for value in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if value in value_options:
+            skip_next = True
+            continue
+        if value.startswith("-"):
+            continue
+        return normalized_action(value)
+    return "startup"
 
 
 if __name__ == "__main__":

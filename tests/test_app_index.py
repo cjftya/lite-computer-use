@@ -12,7 +12,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from app_index import AppIndex, IndexedApp
 from helpers import AppDefinition, AppRegistry, LCUError
-from lcu_tools import resolve_app
+from lcu_tools import launch_app_resilient, resolve_app
 
 
 class AppIndexTests(unittest.TestCase):
@@ -136,6 +136,80 @@ class AppIndexTests(unittest.TestCase):
                 app_path_entries=[app],
             )
         self.assertEqual("Paint", index.apps[0].name)
+
+    def test_configured_not_found_falls_back_to_same_indexed_app_once(self) -> None:
+        configured = AppDefinition("chrome", ("크롬",), ("chrome.exe",))
+        registry = AppRegistry([configured])
+        index = AppIndex(
+            [
+                IndexedApp(
+                    "Google Chrome",
+                    "google chrome",
+                    "app-paths",
+                    r"C:\Apps\chrome.exe",
+                    "chrome.exe",
+                )
+            ]
+        )
+        backend = Mock()
+        backend.launch_app.side_effect = [
+            LCUError("app_launch_failed", "missing", notFoundOnly=True),
+            {"name": "Google Chrome", "source": "app-paths"},
+        ]
+        with patch.object(AppIndex, "load", return_value=index) as load:
+            result = launch_app_resilient(backend, registry, "크롬")
+        self.assertEqual("registry-not-found", result["fallbackFrom"])
+        self.assertEqual(2, backend.launch_app.call_count)
+        load.assert_called_once_with()
+
+    def test_access_denial_never_fans_out_to_index(self) -> None:
+        registry = AppRegistry(
+            [AppDefinition("chrome", ("크롬",), ("chrome.exe",))]
+        )
+        backend = Mock()
+        backend.launch_app.side_effect = LCUError(
+            "app_launch_failed", "denied", notFoundOnly=False
+        )
+        with patch.object(AppIndex, "load") as load, self.assertRaises(LCUError):
+            launch_app_resilient(backend, registry, "크롬")
+        load.assert_not_called()
+
+    def test_resolve_any_maps_localized_alias_to_process(self) -> None:
+        index = AppIndex(
+            [
+                IndexedApp(
+                    "Google Chrome",
+                    "google chrome",
+                    "app-paths",
+                    r"C:\Apps\chrome.exe",
+                    "chrome.exe",
+                )
+            ]
+        )
+        app = index.resolve_any({"크롬", "chrome", "chrome.exe"})
+        self.assertEqual("Google Chrome", app.name)
+
+    def test_stale_indexed_target_refreshes_at_most_once(self) -> None:
+        registry = AppRegistry(
+            [AppDefinition("chrome", ("크롬",), ("chrome.exe",))]
+        )
+        stale = AppIndex(
+            [IndexedApp("Discord", "discord", "start-menu", "old.lnk")],
+            refreshed=False,
+        )
+        fresh = AppIndex(
+            [IndexedApp("Discord", "discord", "start-menu", "new.lnk")],
+            refreshed=True,
+        )
+        backend = Mock()
+        backend.launch_app.side_effect = [
+            LCUError("app_launch_failed", "missing", notFoundOnly=True),
+            {"name": "Discord", "source": "start-menu"},
+        ]
+        with patch.object(AppIndex, "load", side_effect=[stale, fresh]) as load:
+            result = launch_app_resilient(backend, registry, "Discord")
+        self.assertEqual("Discord", result["name"])
+        self.assertEqual([unittest.mock.call(), unittest.mock.call(refresh=True)], load.call_args_list)
 
 
 if __name__ == "__main__":

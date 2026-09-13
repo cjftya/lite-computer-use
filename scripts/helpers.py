@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import time
+import ctypes
+import hashlib
+import uuid
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -103,6 +107,22 @@ class AppRegistry:
     def names(self) -> list[str]:
         return [definition.name for definition in self._definitions]
 
+    def definitions(self) -> tuple[AppDefinition, ...]:
+        return self._definitions
+
+    def lookup_terms_for(self, query: str) -> set[str]:
+        definition = self._aliases.get(normalize_name(query))
+        if definition is None:
+            return {query}
+        terms = {definition.name, *definition.aliases}
+        for command in definition.commands:
+            expanded = os.path.expandvars(command)
+            if expanded.endswith(":"):
+                continue
+            filename = Path(expanded).name
+            terms.update({filename, Path(filename).stem})
+        return {term for term in terms if normalize_name(term)}
+
     def process_names_for(self, query: str) -> set[str]:
         definition = self._aliases.get(normalize_name(query))
         if definition is None:
@@ -120,6 +140,10 @@ class AppRegistry:
 
 def normalize_name(value: str) -> str:
     return " ".join(value.casefold().strip().split())
+
+
+def target_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
 
 
 def runtime_root() -> Path:
@@ -213,7 +237,10 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"host": urlsplit(url).hostname or ""}
     if action in {"open_file", "open_folder", "reveal_file"}:
         value = Path(str(arguments.get("path", "")))
-        return {"extension": value.suffix.casefold()}
+        return {
+            "extension": value.suffix.casefold(),
+            "targetFingerprint": target_fingerprint(str(value)),
+        }
     if action in {"click", "double_click"}:
         return {
             "x": arguments.get("x"),
@@ -238,7 +265,8 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
             "relative_to": arguments.get("relative_to", "screen"),
         }
     if action == "launch_app":
-        return {"name": arguments.get("name")}
+        name = str(arguments.get("name", ""))
+        return {"name": name, "targetFingerprint": target_fingerprint(normalize_name(name))}
     if action == "list_apps":
         return {"refresh": bool(arguments.get("refresh", False))}
     if action in {
@@ -248,7 +276,13 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         "close_window",
         "wait_for_window",
     }:
-        details = {"query_length": len(str(arguments.get("title", "")))}
+        title = str(arguments.get("title", ""))
+        hwnd = arguments.get("hwnd")
+        details = {
+            "query_length": len(title),
+            "targetFingerprint": target_fingerprint(title) if title else None,
+            "hwndSpecified": hwnd is not None,
+        }
         for key in ("state", "width", "height", "timeout"):
             if key in arguments:
                 details[key] = arguments[key]
@@ -268,26 +302,26 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if action == "sequence":
         # The sequence JSON can contain typed text and window titles. Record
         # only its encoded length; per-step results remain in the CLI response.
-        return {"payload_length": len(str(arguments.get("sequence_json", "")))}
+        inline = arguments.get("sequence_json")
+        source = "inline" if inline is not None else (
+            "file" if arguments.get("sequence_file") is not None else "stdin"
+        )
+        return {
+            "payload_length": len(inline) if isinstance(inline, str) else None,
+            "source": source,
+        }
+    if action in {"find_file", "find_folder"}:
+        query = str(arguments.get("query", ""))
+        return {
+            "queryLength": len(query),
+            "targetFingerprint": target_fingerprint(normalize_name(query)),
+            "explicitRoot": bool(arguments.get("root")),
+        }
     return {}
 
 
 def default_search_roots() -> list[Path]:
-    home = Path.home()
-    candidates = [home / "Desktop", home / "Downloads", home / "Documents"]
-    if os.name == "nt":
-        profile = Path(os.environ.get("USERPROFILE", str(home)))
-        onedrive = Path(os.environ.get("OneDrive", str(profile / "OneDrive")))
-        candidates.extend(
-            [
-                profile / "Desktop",
-                profile / "Downloads",
-                profile / "Documents",
-                onedrive / "Desktop",
-                onedrive / "Documents",
-            ]
-        )
-
+    candidates = [Path(item["path"]) for item in known_folders().values()]
     result: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -298,42 +332,293 @@ def default_search_roots() -> list[Path]:
     return result
 
 
+KNOWN_FOLDER_IDS = {
+    "desktop": "B4BFCC3A-DB2C-424C-B029-7FE99A87C641",
+    "documents": "FDD39AD0-238F-46AF-ADB4-6C85480369C7",
+    "downloads": "374DE290-123F-4565-9164-39C4925E467B",
+}
+
+
+def _windows_known_folder(folder_id: str) -> Path:
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_ulong),
+            ("Data2", ctypes.c_ushort),
+            ("Data3", ctypes.c_ushort),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    value = uuid.UUID(folder_id)
+    raw = value.bytes_le
+    guid = GUID.from_buffer_copy(raw)
+    output = ctypes.c_wchar_p()
+    shell32 = ctypes.windll.shell32
+    shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(GUID),
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    result = shell32.SHGetKnownFolderPath(
+        ctypes.byref(guid), 0, None, ctypes.byref(output)
+    )
+    if result != 0 or not output.value:
+        raise OSError(result, "SHGetKnownFolderPath failed")
+    try:
+        return Path(output.value)
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(ctypes.cast(output, ctypes.c_void_p))
+
+
+def known_folders() -> dict[str, dict[str, Any]]:
+    """Return real Windows shell folders, retaining explicit fallback provenance."""
+    home = Path.home()
+    fallbacks = {
+        "desktop": home / "Desktop",
+        "documents": home / "Documents",
+        "downloads": home / "Downloads",
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for name, fallback in fallbacks.items():
+        path = fallback
+        source = "fallback"
+        fallback_used = True
+        if os.name == "nt":
+            try:
+                path = _windows_known_folder(KNOWN_FOLDER_IDS[name])
+                source = "windows-known-folder-api"
+                fallback_used = False
+            except (AttributeError, OSError, ValueError):
+                pass
+        result[name] = {
+            "path": str(path),
+            "source": source,
+            "fallbackUsed": fallback_used,
+            "exists": path.is_dir(),
+        }
+    return result
+
+
+DEFAULT_SEARCH_EXCLUDES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+}
+
+
+def search_entries(
+    query: str,
+    roots: Iterable[Path],
+    limit: int = 20,
+    *,
+    kind: str = "file",
+    max_depth: int = 6,
+    max_visited: int = 20_000,
+    timeout: float = 3.0,
+    include_ignored: bool = False,
+    strict_roots: bool = False,
+) -> dict[str, Any]:
+    needle = normalize_name(query)
+    if not needle:
+        raise LCUError("invalid_query", "Search query cannot be empty")
+    if not 1 <= limit <= 100:
+        raise LCUError("invalid_limit", "Result limit must be between 1 and 100")
+    if kind not in {"file", "folder", "any"}:
+        raise LCUError("invalid_kind", "Search kind must be file, folder, or any")
+    if not 0 <= max_depth <= 32:
+        raise LCUError("invalid_max_depth", "Maximum depth must be between 0 and 32")
+    if not 1 <= max_visited <= 1_000_000:
+        raise LCUError(
+            "invalid_max_visited", "Maximum visited entries must be between 1 and 1000000"
+        )
+    if not 0 < timeout <= 30:
+        raise LCUError("invalid_timeout", "Search timeout must be greater than 0 and at most 30 seconds")
+
+    started = time.monotonic()
+    resolved_roots: list[Path] = []
+    seen_roots: set[str] = set()
+    for raw_root in roots:
+        root = Path(raw_root).expanduser()
+        if not root.is_absolute():
+            raise LCUError(
+                "relative_path_not_allowed",
+                "Search roots must be absolute",
+                stage="validate_search_root",
+                retryable=False,
+                nextAction="provide_absolute_root",
+            )
+        root = root.resolve(strict=False)
+        key = os.path.normcase(str(root))
+        if key in seen_roots:
+            continue
+        try:
+            root_mode = root.stat().st_mode
+        except FileNotFoundError as exc:
+            if strict_roots:
+                raise LCUError(
+                    "search_root_not_found",
+                    "Search root does not exist",
+                    stage="validate_search_root",
+                    retryable=False,
+                    nextAction="verify_search_root",
+                ) from exc
+            continue
+        except PermissionError as exc:
+            if strict_roots:
+                raise LCUError(
+                    "access_denied",
+                    "Access was denied while validating a search root",
+                    stage="validate_search_root",
+                    retryable=False,
+                    nextAction="check_access",
+                ) from exc
+            continue
+        except OSError:
+            if strict_roots:
+                raise LCUError(
+                    "search_root_invalid",
+                    "Search root could not be validated",
+                    stage="validate_search_root",
+                    retryable=False,
+                    nextAction="verify_search_root",
+                )
+            continue
+        if not stat.S_ISDIR(root_mode):
+            if strict_roots:
+                raise LCUError(
+                    "not_a_folder",
+                    "Search root is not a folder",
+                    stage="validate_search_root",
+                    retryable=False,
+                    nextAction="provide_folder_root",
+                )
+            continue
+        seen_roots.add(key)
+        resolved_roots.append(root)
+
+    visited = 0
+    matches: list[tuple[float, int, Path, str]] = []
+    stopped_reason: str | None = None
+    excluded = set() if include_ignored else DEFAULT_SEARCH_EXCLUDES
+    seen_directories = {os.path.normcase(str(root)) for root in resolved_roots}
+    depth_limited = False
+    excluded_count = 0
+
+    def budget_available() -> bool:
+        nonlocal stopped_reason
+        if visited >= max_visited:
+            stopped_reason = "visited_limit"
+            return False
+        if time.monotonic() - started >= timeout:
+            stopped_reason = "time_limit"
+            return False
+        return True
+
+    for root in resolved_roots:
+        stack: list[tuple[Path, int]] = [(root, 0)]
+        while stack and budget_available():
+            directory, depth = stack.pop()
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not budget_available():
+                            break
+                        visited += 1
+                        try:
+                            is_dir = entry.is_dir(follow_symlinks=False)
+                            is_file = entry.is_file(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        normalized = normalize_name(entry.name)
+                        entry_kind = "folder" if is_dir else "file"
+                        wanted = kind == "any" or kind == entry_kind
+                        if wanted and needle in normalized:
+                            path = Path(entry.path)
+                            try:
+                                stat_result = entry.stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            matches.append(
+                                (
+                                    stat_result.st_mtime,
+                                    stat_result.st_size if is_file else 0,
+                                    path,
+                                    entry_kind,
+                                )
+                            )
+                            if len(matches) >= limit:
+                                stopped_reason = "result_limit"
+                                break
+                        if is_dir and normalize_name(entry.name) in excluded:
+                            excluded_count += 1
+                            continue
+                        if is_dir and depth >= max_depth:
+                            depth_limited = True
+                            continue
+                        if (
+                            is_dir
+                            and depth < max_depth
+                            and not entry.is_symlink()
+                        ):
+                            try:
+                                attributes = getattr(
+                                    entry.stat(follow_symlinks=False),
+                                    "st_file_attributes",
+                                    0,
+                                )
+                            except OSError:
+                                continue
+                            if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+                                continue
+                            child = Path(entry.path)
+                            child_key = os.path.normcase(str(child.resolve(strict=False)))
+                            if child_key not in seen_directories:
+                                seen_directories.add(child_key)
+                                stack.append((child, depth + 1))
+                    if stopped_reason:
+                        break
+            except OSError:
+                continue
+        if stopped_reason:
+            break
+
+    if stopped_reason is None and depth_limited:
+        stopped_reason = "depth_limit"
+
+    matches.sort(key=lambda item: (-item[0], normalize_name(item[2].name)))
+    elapsed_ms = round((time.monotonic() - started) * 1000, 3)
+    return {
+        "matches": [
+            {
+                "path": str(path.resolve(strict=False)),
+                "name": path.name,
+                "kind": entry_kind,
+                "extension": path.suffix.casefold() if entry_kind == "file" else "",
+                "size": size,
+                "modified": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+            }
+            for mtime, size, path, entry_kind in matches
+        ],
+        "roots": [str(root) for root in resolved_roots],
+        "elapsedMs": elapsed_ms,
+        "visitedCount": visited,
+        "truncated": stopped_reason is not None,
+        "incomplete": stopped_reason is not None,
+        "stoppedReason": stopped_reason,
+        "excludedDirectories": sorted(excluded),
+        "excludedCount": excluded_count,
+        "excludedByPolicy": excluded_count > 0,
+    }
+
+
 def find_files(
     query: str, roots: Iterable[Path], limit: int = 20
 ) -> list[dict[str, Any]]:
-    needle = normalize_name(query)
-    if not needle:
-        raise LCUError("invalid_query", "File query cannot be empty")
-    if not 1 <= limit <= 100:
-        raise LCUError("invalid_limit", "File result limit must be between 1 and 100")
-
-    matches: list[tuple[float, int, Path]] = []
-    for root in roots:
-        root = Path(root).expanduser()
-        if not root.is_dir():
-            continue
-        for directory, dirnames, filenames in os.walk(
-            root, topdown=True, followlinks=False
-        ):
-            dirnames[:] = [name for name in dirnames if not name.startswith(".")]
-            for filename in filenames:
-                if needle not in normalize_name(filename):
-                    continue
-                path = Path(directory) / filename
-                try:
-                    stat = path.stat()
-                except OSError:
-                    continue
-                matches.append((stat.st_mtime, stat.st_size, path))
-
-    matches.sort(key=lambda item: (-item[0], normalize_name(item[2].name)))
-    return [
-        {
-            "path": str(path.resolve(strict=False)),
-            "name": path.name,
-            "extension": path.suffix.casefold(),
-            "size": size,
-            "modified": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
-        }
-        for mtime, size, path in matches[:limit]
-    ]
+    return search_entries(query, roots, limit, kind="file")["matches"]

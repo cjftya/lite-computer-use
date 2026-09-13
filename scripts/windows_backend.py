@@ -2,49 +2,18 @@ from __future__ import annotations
 
 import ctypes
 import math
+import ntpath
 import os
 import shutil
 import struct
-import subprocess
 import tempfile
 import time
-import webbrowser
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
+from direct_backend import DirectWindowsBackend
 from helpers import AppDefinition, AppRegistry, LCUError, normalize_name
-
-BLOCKED_OPEN_EXTENSIONS = {
-    ".appref-ms",
-    ".application",
-    ".bat",
-    ".chm",
-    ".cmd",
-    ".com",
-    ".cpl",
-    ".exe",
-    ".hta",
-    ".iso",
-    ".jar",
-    ".js",
-    ".jse",
-    ".lnk",
-    ".msc",
-    ".msi",
-    ".ps1",
-    ".py",
-    ".pyw",
-    ".reg",
-    ".scr",
-    ".sh",
-    ".url",
-    ".vbs",
-    ".vbe",
-    ".ws",
-    ".wsf",
-}
 
 KEY_ALIASES = {
     "CONTROL": "ctrl",
@@ -119,7 +88,7 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
 
 
-class WindowsBackend:
+class WindowsBackend(DirectWindowsBackend):
     def __init__(self, app_registry: AppRegistry | None = None) -> None:
         if os.name != "nt":
             raise LCUError("unsupported_platform", "Lite Computer Use requires Windows")
@@ -651,12 +620,44 @@ class WindowsBackend:
             "height": max(0, bottom - top),
         }
 
-    def _resolve_window(self, query: str) -> dict[str, Any]:
-        needle = normalize_name(query)
+    def _resolve_window(
+        self,
+        query: str | None = None,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
+        *,
+        prefer_active: bool = True,
+    ) -> dict[str, Any]:
+        windows = self.list_windows()
+        if hwnd is not None:
+            candidates = [window for window in windows if window["hwnd"] == hwnd]
+            if not candidates:
+                raise LCUError(
+                    "stale_window_handle",
+                    "The requested window handle no longer exists",
+                    hwnd=hwnd,
+                    stage="resolve_window",
+                    retryable=False,
+                    nextAction="run_list_windows",
+                )
+            target = candidates[0]
+            if expected_pid is not None and target.get("pid") != expected_pid:
+                raise LCUError(
+                    "window_pid_mismatch",
+                    "The window handle belongs to a different process",
+                    hwnd=hwnd,
+                    expectedPid=expected_pid,
+                    actualPid=target.get("pid"),
+                    stage="resolve_window",
+                    retryable=False,
+                    nextAction="run_list_windows",
+                )
+            return target
+
+        needle = normalize_name(query or "")
         if not needle:
             raise LCUError("invalid_window_query", "Window title query cannot be empty")
-        windows = self.list_windows()
-        aliases = {needle, normalize_name(Path(query).stem)}
+        aliases = {needle, normalize_name(Path(query or "").stem)}
         app_registry = getattr(self, "app_registry", None)
         if app_registry is not None:
             aliases.update(app_registry.process_names_for(query))
@@ -688,7 +689,7 @@ class WindowsBackend:
         if not candidates:
             raise LCUError("window_not_found", f"No window matched: {query}")
         active_matches = [window for window in candidates if window["active"]]
-        if active_matches:
+        if active_matches and prefer_active:
             candidates = active_matches
         elif len(candidates) > 1:
             raise LCUError(
@@ -699,11 +700,27 @@ class WindowsBackend:
                     for window in candidates
                 ],
             )
+        target = candidates[0]
+        if expected_pid is not None and target.get("pid") != expected_pid:
+            raise LCUError(
+                "window_pid_mismatch",
+                "The matched window belongs to a different process",
+                expectedPid=expected_pid,
+                actualPid=target.get("pid"),
+                stage="resolve_window",
+                retryable=False,
+                nextAction="run_list_windows",
+            )
+        return target
 
-        return candidates[0]
-
-    def focus_window(self, query: str) -> dict[str, Any]:
-        target = self._resolve_window(query)
+    def focus_window(
+        self,
+        query: str | None = None,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
+        timeout: float = 1.0,
+    ) -> dict[str, Any]:
+        target = self._resolve_window(query, hwnd, expected_pid)
         hwnd = target["hwnd"]
         if self.win32gui.IsIconic(hwnd):
             self.win32gui.ShowWindow(hwnd, self.win32con.SW_RESTORE)
@@ -718,9 +735,54 @@ class WindowsBackend:
             )
             self.win32gui.BringWindowToTop(hwnd)
             self.win32gui.SetForegroundWindow(hwnd)
-        return {"hwnd": hwnd, "title": target["title"]}
+        deadline = time.monotonic() + timeout
+        while self.win32gui.GetForegroundWindow() != hwnd:
+            if time.monotonic() >= deadline:
+                raise LCUError(
+                    "window_focus_unverified",
+                    "Windows did not make the requested window foreground",
+                    hwnd=hwnd,
+                    stage="verify_foreground",
+                    retryable=True,
+                    nextAction="focus_once_then_stop_if_rejected",
+                )
+            time.sleep(0.05)
+        return {
+            "hwnd": hwnd,
+            "pid": target.get("pid"),
+            "title": target["title"],
+            "status": "verified",
+            "osStateVerified": True,
+            "focusChanged": True,
+        }
 
-    def set_window_state(self, query: str, state: str) -> dict[str, Any]:
+    def ensure_input_target(
+        self,
+        query: str | None = None,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
+    ) -> dict[str, Any]:
+        target = self._resolve_window(query, hwnd, expected_pid)
+        if self.win32gui.GetForegroundWindow() == target["hwnd"]:
+            return {
+                "hwnd": target["hwnd"],
+                "pid": target.get("pid"),
+                "title": target["title"],
+                "status": "verified",
+                "osStateVerified": True,
+                "focusChanged": False,
+            }
+        return self.focus_window(
+            hwnd=target["hwnd"], expected_pid=target.get("pid")
+        )
+
+    def set_window_state(
+        self,
+        query: str | None,
+        state: str,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
+    ) -> dict[str, Any]:
         commands = {
             "restore": self.win32con.SW_RESTORE,
             "minimize": self.win32con.SW_MINIMIZE,
@@ -732,12 +794,21 @@ class WindowsBackend:
             raise LCUError(
                 "invalid_window_state", f"Unknown window state: {state}"
             ) from exc
-        target = self._resolve_window(query)
+        target = self._resolve_window(
+            query, hwnd, expected_pid, prefer_active=False
+        )
         self.win32gui.ShowWindow(target["hwnd"], command)
         return {"hwnd": target["hwnd"], "title": target["title"], "state": state}
 
     def set_window_bounds(
-        self, query: str, x: int, y: int, width: int, height: int
+        self,
+        query: str | None,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
     ) -> dict[str, Any]:
         if width <= 0 or height <= 0:
             raise LCUError(
@@ -757,7 +828,9 @@ class WindowsBackend:
                 requested={"x": x, "y": y, "width": width, "height": height},
                 bounds=desktop,
             )
-        target = self._resolve_window(query)
+        target = self._resolve_window(
+            query, hwnd, expected_pid, prefer_active=False
+        )
         if self.win32gui.IsIconic(target["hwnd"]) or self.win32gui.IsZoomed(
             target["hwnd"]
         ):
@@ -777,13 +850,25 @@ class WindowsBackend:
             },
         }
 
-    def close_window(self, query: str) -> dict[str, Any]:
-        target = self._resolve_window(query)
+    def close_window(
+        self,
+        query: str | None = None,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
+    ) -> dict[str, Any]:
+        target = self._resolve_window(
+            query, hwnd, expected_pid, prefer_active=False
+        )
         self.win32gui.PostMessage(target["hwnd"], self.win32con.WM_CLOSE, 0, 0)
         return {"hwnd": target["hwnd"], "title": target["title"], "requested": True}
 
     def wait_for_window(
-        self, query: str, state: str = "present", timeout: float = 10.0
+        self,
+        query: str | None,
+        state: str = "present",
+        timeout: float = 10.0,
+        hwnd: int | None = None,
+        expected_pid: int | None = None,
     ) -> dict[str, Any]:
         if state not in {"present", "gone", "active"}:
             raise LCUError("invalid_window_state", f"Unknown wait state: {state}")
@@ -797,9 +882,9 @@ class WindowsBackend:
         while True:
             target: dict[str, Any] | None
             try:
-                target = self._resolve_window(query)
+                target = self._resolve_window(query, hwnd, expected_pid)
             except LCUError as exc:
-                if exc.code != "window_not_found":
+                if exc.code not in {"window_not_found", "stale_window_handle"}:
                     raise
                 target = None
 
@@ -814,8 +899,11 @@ class WindowsBackend:
                 return {
                     "found": True,
                     "hwnd": target["hwnd"],
+                    "pid": target.get("pid"),
                     "title": target["title"],
                     "state": state,
+                    "status": "verified" if state == "active" else "present_unverified",
+                    "inputReady": state == "active",
                 }
             if time.monotonic() >= deadline:
                 raise LCUError(
@@ -826,31 +914,51 @@ class WindowsBackend:
                 )
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
-    def launch_app(self, app: AppDefinition) -> dict[str, str]:
-        failures: list[str] = []
+    def launch_app(self, app: AppDefinition) -> dict[str, Any]:
+        failures: list[dict[str, Any]] = []
+        not_found_only = True
         for command in app.commands:
             try:
                 launched = self._launch_command(command)
-                result = {"name": app.name, "source": app.source}
+                result: dict[str, Any] = {
+                    "name": app.name,
+                    "source": app.source,
+                    "status": "dispatch_accepted",
+                    "dispatchAccepted": True,
+                    "osStateVerified": False,
+                    "verification": "unverified",
+                }
                 if app.source == "registry":
-                    result["command"] = launched
+                    result["command"] = self._public_command(launched)
                 return result
             except OSError as exc:
+                error_number = getattr(exc, "winerror", None) or exc.errno
+                not_found_only = not_found_only and error_number in {2, 3}
+                failure: dict[str, Any] = {"osError": error_number}
                 if app.source == "registry":
-                    failures.append(f"{command}: {exc}")
-                else:
-                    failures.append(f"OS error {exc.errno or 'unknown'}")
+                    failure["command"] = self._public_command(command)
+                failures.append(failure)
         details: dict[str, Any] = {
             "source": app.source,
             "failures": failures,
+            "notFoundOnly": bool(failures) and not_found_only,
+            "stage": "dispatch",
+            "retryable": bool(failures) and not_found_only,
+            "nextAction": "resolve_installed_app_once" if not_found_only else "stop",
         }
         if app.source == "registry":
-            details["attempted"] = list(app.commands)
+            details["attempted"] = [self._public_command(command) for command in app.commands]
         raise LCUError(
             "app_launch_failed",
             f"Could not launch app: {app.name}",
             **details,
         )
+
+    @staticmethod
+    def _public_command(command: str) -> str:
+        if command.endswith(":"):
+            return command
+        return ntpath.basename(command) or "configured-command"
 
     def _launch_command(self, command: str) -> str:
         expanded = os.path.expandvars(command)
@@ -883,55 +991,6 @@ class WindowsBackend:
             except OSError:
                 continue
         return None
-
-    @staticmethod
-    def open_file(path_value: str) -> dict[str, str]:
-        path = Path(os.path.expandvars(path_value)).expanduser().resolve(strict=False)
-        if not path.exists():
-            raise LCUError("file_not_found", f"File does not exist: {path}")
-        if not path.is_file():
-            raise LCUError("not_a_file", f"Path is not a file: {path}")
-        if path.suffix.casefold() in BLOCKED_OPEN_EXTENSIONS:
-            raise LCUError(
-                "executable_file_blocked",
-                "open_file does not execute programs or scripts",
-                extension=path.suffix.casefold(),
-            )
-        os.startfile(str(path))
-        return {"path": str(path)}
-
-    @staticmethod
-    def open_folder(path_value: str) -> dict[str, str]:
-        path = Path(os.path.expandvars(path_value)).expanduser().resolve(strict=False)
-        if not path.exists():
-            raise LCUError("folder_not_found", f"Folder does not exist: {path}")
-        if not path.is_dir():
-            raise LCUError("not_a_folder", f"Path is not a folder: {path}")
-        os.startfile(str(path))
-        return {"path": str(path)}
-
-    @staticmethod
-    def reveal_file(path_value: str) -> dict[str, str]:
-        path = Path(os.path.expandvars(path_value)).expanduser().resolve(strict=False)
-        if not path.exists():
-            raise LCUError("file_not_found", f"File does not exist: {path}")
-        if not path.is_file():
-            raise LCUError("not_a_file", f"Path is not a file: {path}")
-        subprocess.Popen(["explorer.exe", f"/select,{path}"], close_fds=True)
-        return {"path": str(path)}
-
-    @staticmethod
-    def open_url(url: str) -> dict[str, str]:
-        parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise LCUError(
-                "invalid_url", "Only absolute HTTP and HTTPS URLs are allowed"
-            )
-        if not webbrowser.open(url, new=0, autoraise=True):
-            raise LCUError(
-                "browser_launch_failed", "The default browser rejected the URL"
-            )
-        return {"url": url, "host": parsed.hostname}
 
     def set_clipboard(self, text: str) -> dict[str, int]:
         self._open_clipboard()

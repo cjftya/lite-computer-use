@@ -1,4 +1,4 @@
-# v1.3.1 latency benchmark
+# v1.4 execution reliability and latency benchmark
 
 Measure on an interactive Windows 11 desktop through the same host/model used for normal work. Keep display layout, scale, app state, network, and prompts stable. Run each scenario at least five times. Compare success and safety first; reject a faster route if either regresses.
 
@@ -6,7 +6,7 @@ Measure on an interactive Windows 11 desktop through the same host/model used fo
 
 Record success, cold/warm app-cache state, CLI calls, screenshots by scope, original and output pixels, vision turns, retries/fallbacks, each `meta.durationMs`, end-to-end time, and host-reported input/image/total tokens when available. Lite Computer Use does not infer model token counts from PNG size.
 
-## L1–L7 scenarios
+## L1–L10 scenarios
 
 | ID | Request | Expected route | Main comparison |
 |---|---|---|---|
@@ -17,6 +17,9 @@ Record success, cold/warm app-cache state, CLI calls, screenshots by scope, orig
 | L5 | 작은 체크박스를 찾아 눌러줘 | 0.5 preview, then scale-1 region | pixels/tokens vs repeated full captures |
 | L6 | 메모장 열고 테스트라고 입력해줘 | one launch/wait/type sequence | one CLI process, zero vision |
 | L7 | Chrome 주소창에 OpenAI 입력 후 Enter | one focus/hotkey/type/key sequence | one CLI process, zero vision |
+| L8 | 알려진 절대 PDF 열기 | one direct `open_file` | one CLI call, no GUI-library initialization, no retry |
+| L9 | Downloads에서 계약서 찾기 | bounded root `find_file`, choose, direct open | incomplete state and visited/time budget |
+| L10 | 크롬 별칭 창에 한글 입력 | wait, verified focus, targeted input | no input before foreground verification |
 
 Use harmless local data. Do not submit, purchase, install, delete, overwrite, approve UAC, or change security settings during measurement.
 
@@ -25,7 +28,7 @@ Use harmless local data. Do not submit, purchase, install, delete, overwrite, ap
 | Version | Scenario | Run | Success | Cache | CLI calls | Screenshots A/P/All/R | Original → output pixels | Vision turns | Retries/fallbacks | Local ms | End-to-end ms | Input/image/total tokens | Notes |
 |---|---|---:|---|---|---:|---|---|---:|---|---:|---:|---|---|
 | v1.3 | L1 | 1 | | cold | | | | | | | | | |
-| v1.3.1 | L1 | 1 | | cold | | | | | | | | | |
+| v1.4 | L1 | 1 | | cold | | | | | | | | | |
 
 `A/P/All/R` means active-window, primary-screen, all-screen, and region captures. For scaled images, compute output-pixel ratio as `(width × height) / (originalWidth × originalHeight)`; a 0.5 scale should be about 25% of the pixels.
 
@@ -40,7 +43,7 @@ Use harmless local data. Do not submit, purchase, install, delete, overwrite, ap
 
 ## Acceptance
 
-Accept v1.3.1 when:
+Accept v1.4 when:
 
 - all L1–L7 scenarios match or exceed the v1.3 success rate;
 - registered apps retain a one-call fast path, while warm indexed lookup avoids rescanning and launches uniquely matched installed apps without manual config;
@@ -49,3 +52,6 @@ Accept v1.3.1 when:
 - scaled previews materially reduce output pixels/image tokens, while precise actions use a scale-1 region;
 - L7 and other deterministic scenarios use zero screenshots by default;
 - confirmation requirements, fail-safe behavior, and prohibited actions remain unchanged.
+- known absolute paths run once from different working directories and never resolve relative to the host project;
+- direct opens do not initialize GUI libraries and report dispatch as unverified;
+- identical failed host calls are not repeated, and any alternate route is tied to a different recoverable cause.

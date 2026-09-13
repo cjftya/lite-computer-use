@@ -7,8 +7,11 @@ Start with automated checks:
 ```powershell
 py -3.13 -m unittest discover -s tests -v
 py -3.13 -m compileall scripts tests
-py -3.13 scripts/lcu_tools.py list_apps
-py -3.13 scripts/lcu_tools.py list_apps --refresh
+$LcuRoot = (Resolve-Path .).Path
+$Lcu = Join-Path $LcuRoot "scripts\lcu_tools.py"
+py -3.13 "$Lcu" doctor
+py -3.13 "$Lcu" list_apps
+py -3.13 "$Lcu" list_apps --refresh
 ```
 
 Record each item as pass, fail, or blocked.
@@ -69,6 +72,25 @@ Record each item as pass, fail, or blocked.
 10. Confirm a configured alias wins over the installed-app index.
 11. Confirm a partial installed-app name with multiple matches returns `ambiguous_app`.
 12. Run `list_apps` twice and confirm the second call reuses the cache; then run `--refresh` and confirm `cacheRefreshed:true`.
+13. From two unrelated working directories, invoke the absolute `$Lcu` path and open the same absolute test file; confirm the same target and zero retries.
+14. Confirm empty, ordinary relative, `C:relative`, `\root-relative`, and unresolved `%VARIABLE%` paths fail before OS dispatch.
+15. Run `known_folder desktop`, `documents`, and `downloads`; compare each result to Explorer properties and record `source`/`fallbackUsed`.
+16. Use `find_folder`, an explicit `--root`, and low `--max-visited`; confirm no other root is added and an interrupted scan reports `incomplete:true`.
+17. Verify file-association-missing and access-denied errors stay distinct from file-not-found and trigger no identical retry.
+18. Monitor imported modules or cold timing and confirm `open_file`, `open_folder`, `reveal_file`, and `open_url` do not load PyAutoGUI, Pillow, screenshot, clipboard, or window modules.
+
+## v1.4 target and retry checks
+
+1. Run standalone `focus_window "크롬"` and sequence `focus_window` with the Korean alias; confirm both resolve the configured Chrome process.
+2. Use `list_windows`, then focus/type with its `hwnd` and PID. Close the window and reuse the handle; confirm `stale_window_handle` with no retargeting.
+3. Supply the wrong PID for a valid handle; confirm `window_pid_mismatch` and no input.
+4. Arrange for focus stealing to be rejected; confirm `window_focus_unverified` and zero injected keys/text.
+5. Open two similar Notepad windows and run `close_window` with an ambiguous title; confirm neither receives a close request.
+6. Break a configured executable alias while leaving the real indexed app installed; confirm one same-app fallback. Repeat with access denied; confirm no fallback.
+7. Use a removed cached shortcut; confirm no more than one refresh and no whole-command replay.
+8. Trigger an ordinary `OSError` on the second harmless sequence step; confirm prior results, failed index/action, cause, and partial-effect state remain in JSON and no later step runs.
+9. Pass the same Korean sequence through `--json`, absolute UTF-8 `--file`, and `--stdin` in PowerShell.
+10. Record OS dispatch acceptance separately from visible document/page completion; do not mark a load verified without an explicit state/visual check.
 
 ## Antigravity scenarios
 
@@ -85,7 +107,7 @@ After installing the complete skill under `C:\Users\<USER>\.gemini\antigravity\s
 9. "현재 화면의 작은 팝업만 자세히 확인해줘."
 10. "메모장을 닫아줘."
 
-## v1.3.1 Fast Path and token checks
+## Fast Path and token checks
 
 For each request, record CLI invocation count, screenshot count, screenshot scope, retries, `meta.durationMs`, and end-to-end time.
 
@@ -100,7 +122,7 @@ For each request, record CLI invocation count, screenshot count, screenshot scop
 
 Fail the check if the host takes a screenshot before and after every deterministic action, uses a full desktop image while the active window contains the target, or claims visual success without inspecting a needed image.
 
-## v1.3.1 sequence checks
+## Sequence checks
 
 1. Run address-bar focus → text → Enter as one sequence and confirm ordered results.
 2. Run a sequence with exactly eight allowed steps; confirm success.

@@ -160,37 +160,43 @@ class AppIndex:
 
         base_key = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
         apps: list[IndexedApp] = []
+        views = [0]
+        for flag_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+            flag = getattr(winreg, flag_name, None)
+            if flag is not None and flag not in views:
+                views.append(flag)
         for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                root = winreg.OpenKey(hive, base_key)
-            except OSError:
-                continue
-            with root:
+            for view in views:
                 try:
-                    count = winreg.QueryInfoKey(root)[0]
+                    root = winreg.OpenKey(hive, base_key, 0, winreg.KEY_READ | view)
                 except OSError:
                     continue
-                for index in range(count):
+                with root:
                     try:
-                        subkey_name = winreg.EnumKey(root, index)
-                        with winreg.OpenKey(root, subkey_name) as subkey:
-                            target, _ = winreg.QueryValueEx(subkey, None)
+                        count = winreg.QueryInfoKey(root)[0]
                     except OSError:
                         continue
-                    if not isinstance(target, str) or not target.strip():
-                        continue
-                    target = target.strip().strip('"')
-                    process = Path(subkey_name).name.casefold()
-                    name = Path(subkey_name).stem
-                    apps.append(
-                        IndexedApp(
-                            name=name,
-                            normalized=normalize_name(name),
-                            source="app-paths",
-                            target=target,
-                            process=process,
+                    for index in range(count):
+                        try:
+                            subkey_name = winreg.EnumKey(root, index)
+                            with winreg.OpenKey(root, subkey_name) as subkey:
+                                target, _ = winreg.QueryValueEx(subkey, None)
+                        except OSError:
+                            continue
+                        if not isinstance(target, str) or not target.strip():
+                            continue
+                        target = target.strip().strip('"')
+                        process = Path(subkey_name).name.casefold()
+                        name = Path(subkey_name).stem
+                        apps.append(
+                            IndexedApp(
+                                name=name,
+                                normalized=normalize_name(name),
+                                source="app-paths",
+                                target=target,
+                                process=process,
+                            )
                         )
-                    )
         return apps
 
     @staticmethod
@@ -269,6 +275,48 @@ class AppIndex:
                 candidates=[app.public_result() for app in candidates],
             )
         return candidates[0].as_definition()
+
+    def resolve_any(self, terms: set[str]) -> AppDefinition:
+        needles = {normalize_name(term) for term in terms if normalize_name(term)}
+        if not needles:
+            raise LCUError("invalid_app_query", "App query cannot be empty")
+        exact = [
+            app
+            for app in self.apps
+            if app.normalized in needles
+            or normalize_name(app.process or "") in needles
+            or normalize_name(Path(app.process or "").stem) in needles
+        ]
+        candidates = exact or [
+            app
+            for app in self.apps
+            if any(
+                needle in app.normalized
+                or needle in normalize_name(app.process or "")
+                for needle in needles
+            )
+        ]
+        unique: list[IndexedApp] = []
+        seen: set[tuple[str, ...]] = set()
+        for app in candidates:
+            process = normalize_name(app.process or "")
+            identity = (
+                ("process", process)
+                if process
+                else ("target", app.normalized, os.path.normcase(app.target))
+            )
+            if identity not in seen:
+                seen.add(identity)
+                unique.append(app)
+        if not unique:
+            raise LCUError("app_not_found", "No indexed app matched the configured app")
+        if len(unique) > 1:
+            raise LCUError(
+                "ambiguous_app",
+                "Multiple installed apps matched the configured app",
+                candidates=[app.public_result() for app in unique],
+            )
+        return unique[0].as_definition()
 
     def public_apps(self) -> list[dict[str, str | None]]:
         return [app.public_result() for app in self.apps]

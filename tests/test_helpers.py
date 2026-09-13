@@ -14,8 +14,10 @@ from scripts.helpers import (
     LCUError,
     append_action_log,
     find_files,
+    known_folders,
     normalize_name,
     safe_log_details,
+    search_entries,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +61,75 @@ class FileSearchTests(unittest.TestCase):
             find_files("  ", [], limit=10)
         self.assertEqual("invalid_query", context.exception.code)
 
+    def test_result_limit_stops_large_walk_and_marks_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(200):
+                (root / f"match-{index:03d}.txt").write_text("x", encoding="utf-8")
+            result = search_entries("match", [root], limit=1)
+        self.assertEqual(1, len(result["matches"]))
+        self.assertLess(result["visitedCount"], 200)
+        self.assertTrue(result["incomplete"])
+        self.assertEqual("result_limit", result["stoppedReason"])
+
+    def test_folder_search_and_explicit_root_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            first_root = Path(first)
+            second_root = Path(second)
+            (first_root / "Project Alpha").mkdir()
+            (second_root / "Project Beta").mkdir()
+            result = search_entries("Project", [first_root], kind="folder")
+        self.assertEqual(["Project Alpha"], [item["name"] for item in result["matches"]])
+        self.assertEqual([str(first_root)], result["roots"])
+
+    def test_visited_budget_marks_search_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(20):
+                (root / f"other-{index}.txt").write_text("x", encoding="utf-8")
+            result = search_entries("missing", [root], max_visited=5)
+        self.assertEqual(5, result["visitedCount"])
+        self.assertTrue(result["truncated"])
+        self.assertEqual("visited_limit", result["stoppedReason"])
+
+    def test_default_excludes_can_be_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ignored = root / "node_modules"
+            ignored.mkdir()
+            (ignored / "target.txt").write_text("x", encoding="utf-8")
+            excluded = search_entries("target", [root])
+            included = search_entries("target", [root], include_ignored=True)
+        self.assertEqual([], excluded["matches"])
+        self.assertEqual(1, len(included["matches"]))
+
+    def test_relative_search_root_is_rejected(self) -> None:
+        with self.assertRaises(LCUError) as context:
+            search_entries("anything", [Path("relative")])
+        self.assertEqual("relative_path_not_allowed", context.exception.code)
+
+    def test_explicit_missing_root_is_not_silently_skipped(self) -> None:
+        missing = Path(tempfile.gettempdir()) / "lcu-definitely-missing-search-root"
+        with self.assertRaises(LCUError) as context:
+            search_entries("anything", [missing], strict_roots=True)
+        self.assertEqual("search_root_not_found", context.exception.code)
+
+    def test_depth_limit_and_exclusions_are_disclosed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "deep").mkdir()
+            (root / "node_modules").mkdir()
+            result = search_entries("missing", [root], max_depth=0)
+        self.assertTrue(result["incomplete"])
+        self.assertEqual("depth_limit", result["stoppedReason"])
+        self.assertTrue(result["excludedByPolicy"])
+
+    def test_known_folder_fallback_discloses_source(self) -> None:
+        with patch("scripts.helpers.os.name", "posix"):
+            folders = known_folders()
+        self.assertEqual({"desktop", "documents", "downloads"}, set(folders))
+        self.assertTrue(all(item["fallbackUsed"] for item in folders.values()))
+
 
 class SafetyTests(unittest.TestCase):
     def test_sensitive_text_is_not_returned_in_log_details(self) -> None:
@@ -73,6 +144,12 @@ class SafetyTests(unittest.TestCase):
             {"url": "https://example.com/private?token=secret"},
         )
         self.assertEqual({"host": "example.com"}, details)
+
+    def test_path_log_uses_extension_and_fingerprint_only(self) -> None:
+        secret_path = r"C:\Users\me\Secret Client\contract.pdf"
+        details = safe_log_details("open_file", {"path": secret_path})
+        self.assertNotIn(secret_path, json.dumps(details))
+        self.assertIn("targetFingerprint", details)
 
     def test_normalize_name_collapses_case_and_spaces(self) -> None:
         self.assertEqual("google chrome", normalize_name(" Google   Chrome "))
