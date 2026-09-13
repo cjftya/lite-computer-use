@@ -10,22 +10,32 @@ from unittest.mock import Mock, call, patch
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from helpers import LCUError
+from helpers import AppDefinition, LCUError
 from lcu_tools import main, parse_sequence, run_sequence
 
 
 class SequenceValidationTests(unittest.TestCase):
     def test_accepts_only_bounded_deterministic_actions(self) -> None:
         steps = [
+            {"action": "launch-app", "name": "chrome"},
+            {
+                "action": "wait_for_window",
+                "title": "Chrome",
+                "state": "present",
+                "timeout": 5,
+            },
+            {"action": "move_mouse", "x": 10, "y": 20},
+            {"action": "click", "x": 10, "y": 20, "button": "left"},
             {"action": "focus-window", "title": "Chrome"},
             {"action": "hotkey", "keys": ["CTRL", "L"]},
             {"action": "type_text", "text": "OpenAI"},
             {"action": "press_key", "key": "ENTER", "count": 1},
-            {"action": "scroll", "amount": -3},
         ]
         parsed = parse_sequence(json.dumps(steps))
-        self.assertEqual("focus_window", parsed[0]["action"])
-        self.assertEqual(steps[1:], parsed[1:])
+        self.assertEqual("launch_app", parsed[0]["action"])
+        self.assertEqual("focus_window", parsed[4]["action"])
+        self.assertEqual(steps[1:4], parsed[1:4])
+        self.assertEqual(steps[5:], parsed[5:])
 
     def test_rejects_malformed_json(self) -> None:
         with self.assertRaises(LCUError) as context:
@@ -41,6 +51,7 @@ class SequenceValidationTests(unittest.TestCase):
     def test_rejects_screenshot_and_unknown_fields(self) -> None:
         cases = (
             ([{"action": "screenshot"}], "sequence_action_not_allowed"),
+            ([{"action": "drag"}], "sequence_action_not_allowed"),
             (
                 [{"action": "type_text", "text": "safe", "retry": True}],
                 "invalid_sequence_step",
@@ -66,6 +77,36 @@ class SequenceValidationTests(unittest.TestCase):
 
 
 class SequenceExecutionTests(unittest.TestCase):
+    def test_runs_expanded_actions_in_order(self) -> None:
+        backend = Mock()
+        registry = Mock()
+        app = AppDefinition("chrome", ("browser",), ("chrome.exe",))
+        registry.resolve.return_value = app
+        value = json.dumps(
+            [
+                {"action": "launch_app", "name": "chrome"},
+                {"action": "wait_for_window", "title": "Chrome"},
+                {"action": "move_mouse", "x": 10, "y": 20},
+                {
+                    "action": "click",
+                    "x": 10,
+                    "y": 20,
+                    "relative_to": "active-window",
+                    "button": "right",
+                },
+            ]
+        )
+
+        result = run_sequence(backend, value, registry)
+
+        self.assertEqual(4, result["completed"])
+        backend.launch_app.assert_called_once_with(app)
+        backend.wait_for_window.assert_called_once_with("Chrome", "present", 10.0)
+        backend.move_mouse.assert_called_once_with(10, 20, "screen")
+        backend.click.assert_called_once_with(
+            10, 20, "active-window", clicks=1, button="right"
+        )
+
     def test_preserves_action_result_order(self) -> None:
         backend = Mock()
         backend.focus_window.return_value = {"hwnd": 7, "title": "Chrome"}

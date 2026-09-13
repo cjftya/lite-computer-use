@@ -31,6 +31,7 @@ class AppDefinition:
     name: str
     aliases: tuple[str, ...]
     commands: tuple[str, ...]
+    source: str = "registry"
 
 
 class AppRegistry:
@@ -101,6 +102,20 @@ class AppRegistry:
 
     def names(self) -> list[str]:
         return [definition.name for definition in self._definitions]
+
+    def process_names_for(self, query: str) -> set[str]:
+        definition = self._aliases.get(normalize_name(query))
+        if definition is None:
+            return set()
+        names: set[str] = set()
+        for command in definition.commands:
+            expanded = os.path.expandvars(command)
+            if expanded.endswith(":"):
+                continue
+            filename = Path(expanded).name
+            names.add(normalize_name(filename))
+            names.add(normalize_name(Path(filename).stem))
+        return {name for name in names if name}
 
 
 def normalize_name(value: str) -> str:
@@ -224,6 +239,8 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         }
     if action == "launch_app":
         return {"name": arguments.get("name")}
+    if action == "list_apps":
+        return {"refresh": bool(arguments.get("refresh", False))}
     if action in {
         "focus_window",
         "set_window_state",
@@ -243,8 +260,11 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if action == "press_key":
             details["count"] = arguments.get("count", 1)
         return details
-    if action == "screenshot" and arguments.get("region"):
-        return {"region": arguments["region"]}
+    if action == "screenshot":
+        details = {"scale": arguments.get("scale", 1.0)}
+        if arguments.get("region"):
+            details["region"] = arguments["region"]
+        return details
     if action == "sequence":
         # The sequence JSON can contain typed text and window titles. Record
         # only its encoded length; per-step results remain in the CLI response.

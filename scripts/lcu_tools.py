@@ -32,13 +32,16 @@ if sys.version_info < (3, 11):
 
 from helpers import (
     ActionLock,
+    AppDefinition,
     AppRegistry,
     LCUError,
     append_action_log,
     default_search_roots,
     find_files,
+    normalize_name,
     safe_log_details,
 )
+from app_index import AppIndex
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -71,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     screenshot.add_argument("--output", type=Path)
     screenshot.add_argument("--delay", type=float, default=0.0)
+    screenshot.add_argument("--scale", type=float, default=1.0)
 
     for action in ("click", "double_click"):
         click = subparsers.add_parser(action, aliases=[action.replace("_", "-")])
@@ -183,7 +187,8 @@ def build_parser() -> argparse.ArgumentParser:
     set_clipboard.add_argument("text")
     subparsers.add_parser("get_clipboard", aliases=["get-clipboard"])
 
-    subparsers.add_parser("list_apps", aliases=["list-apps"])
+    list_apps = subparsers.add_parser("list_apps", aliases=["list-apps"])
+    list_apps.add_argument("--refresh", action="store_true")
 
     sequence = subparsers.add_parser(
         "sequence", help="Run up to eight safe deterministic actions"
@@ -196,12 +201,23 @@ def normalized_action(action: str) -> str:
     return action.replace("-", "_")
 
 
-def windows_backend() -> Any:
+def windows_backend(registry: AppRegistry | None = None) -> Any:
     if os.name != "nt":
         raise LCUError("unsupported_platform", "Lite Computer Use requires Windows")
     from windows_backend import WindowsBackend
 
-    return WindowsBackend()
+    return WindowsBackend(app_registry=registry)
+
+
+def resolve_app(
+    registry: AppRegistry, query: str, index: AppIndex | None = None
+) -> AppDefinition:
+    try:
+        return registry.resolve(query)
+    except LCUError as exc:
+        if exc.code != "app_not_registered":
+            raise
+    return (index or AppIndex.load()).resolve(query)
 
 
 def run_action(args: argparse.Namespace) -> Any:
@@ -216,15 +232,34 @@ def run_action(args: argparse.Namespace) -> Any:
         }
 
     registry: AppRegistry | None = None
-    if action in {"launch_app", "list_apps"}:
+    if action in {"launch_app", "list_apps", "sequence"}:
         registry = AppRegistry.load(args.config)
     if action == "list_apps":
         assert registry is not None
-        return {"apps": registry.names()}
+        registered_names = registry.names()
+        if os.name != "nt":
+            return {
+                "apps": registered_names,
+                "registeredCount": len(registered_names),
+                "indexedCount": 0,
+                "cacheRefreshed": False,
+            }
+        index = AppIndex.load(refresh=args.refresh)
+        names_by_key = {normalize_name(name): name for name in registered_names}
+        for indexed_app in index.apps:
+            names_by_key.setdefault(indexed_app.normalized, indexed_app.name)
+        names = sorted(names_by_key.values(), key=str.casefold)
+        return {
+            "apps": names,
+            "registeredCount": len(registered_names),
+            "indexedCount": len(index.apps),
+            "cacheRefreshed": index.refreshed,
+        }
 
-    backend = windows_backend()
+    backend = windows_backend(registry)
     if action == "sequence":
-        return run_sequence(backend, args.sequence_json)
+        assert registry is not None
+        return run_sequence(backend, args.sequence_json, registry)
     dispatch: dict[str, Callable[[], Any]] = {
         "screenshot": lambda: _screenshot(backend, args),
         "click": lambda: backend.click(
@@ -268,7 +303,7 @@ def run_action(args: argparse.Namespace) -> Any:
     }
     if action == "launch_app":
         assert registry is not None
-        return backend.launch_app(registry.resolve(args.name))
+        return backend.launch_app(resolve_app(registry, args.name))
     try:
         callback = dispatch[action]
     except KeyError as exc:
@@ -277,6 +312,10 @@ def run_action(args: argparse.Namespace) -> Any:
 
 
 SEQUENCE_FIELDS: dict[str, set[str]] = {
+    "launch_app": {"action", "name"},
+    "wait_for_window": {"action", "title", "state", "timeout"},
+    "click": {"action", "x", "y", "relative_to", "button"},
+    "move_mouse": {"action", "x", "y", "relative_to"},
     "focus_window": {"action", "title"},
     "hotkey": {"action", "keys"},
     "press_key": {"action", "key", "count"},
@@ -356,12 +395,67 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
                 index=index,
             )
 
-    if action == "focus_window":
+    if action == "launch_app":
+        require_string("name")
+        if not step["name"].strip():
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence launch_app name cannot be empty",
+                index=index,
+            )
+    elif action in {"focus_window", "wait_for_window"}:
         require_string("title")
         if not step["title"].strip():
             raise LCUError(
                 "invalid_sequence_step",
-                "Sequence focus_window title cannot be empty",
+                f"Sequence {action} title cannot be empty",
+                index=index,
+            )
+        if action == "wait_for_window":
+            state = step.get("state", "present")
+            if state not in {"present", "gone", "active"}:
+                raise LCUError(
+                    "invalid_sequence_step",
+                    "Sequence wait_for_window state is invalid",
+                    index=index,
+                )
+            timeout = step.get("timeout", 10.0)
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise LCUError(
+                    "invalid_sequence_step",
+                    "Sequence wait_for_window timeout must be numeric",
+                    index=index,
+                )
+            if not 0 < timeout <= 30:
+                raise LCUError(
+                    "invalid_sequence_step",
+                    "Sequence wait_for_window timeout must be greater than 0 "
+                    "and at most 30 seconds",
+                    index=index,
+                )
+    elif action in {"click", "move_mouse"}:
+        for coordinate in ("x", "y"):
+            value = step.get(coordinate)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise LCUError(
+                    "invalid_sequence_step",
+                    f"Sequence {action} {coordinate} must be an integer",
+                    index=index,
+                )
+        if step.get("relative_to", "screen") not in {"screen", "active-window"}:
+            raise LCUError(
+                "invalid_sequence_step",
+                f"Sequence {action} relative_to is invalid",
+                index=index,
+            )
+        if action == "click" and step.get("button", "left") not in {
+            "left",
+            "right",
+            "middle",
+        }:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence click button is invalid",
                 index=index,
             )
     elif action == "hotkey":
@@ -430,13 +524,53 @@ def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
             )
 
 
-def run_sequence(backend: Any, sequence_json: str) -> dict[str, Any]:
+def run_sequence(
+    backend: Any,
+    sequence_json: str,
+    registry: AppRegistry | None = None,
+) -> dict[str, Any]:
     steps = parse_sequence(sequence_json)
     results: list[dict[str, Any]] = []
+    app_index: AppIndex | None = None
     for index, step in enumerate(steps):
         action = step["action"]
         try:
-            if action == "focus_window":
+            if action == "launch_app":
+                if registry is None:
+                    raise LCUError(
+                        "config_not_loaded",
+                        "App registry is required for sequence launch_app",
+                    )
+                try:
+                    app = registry.resolve(step["name"])
+                except LCUError as exc:
+                    if exc.code != "app_not_registered":
+                        raise
+                    if app_index is None:
+                        app_index = AppIndex.load()
+                    app = app_index.resolve(step["name"])
+                result = backend.launch_app(app)
+            elif action == "wait_for_window":
+                result = backend.wait_for_window(
+                    step["title"],
+                    step.get("state", "present"),
+                    step.get("timeout", 10.0),
+                )
+            elif action == "click":
+                result = backend.click(
+                    step["x"],
+                    step["y"],
+                    step.get("relative_to", "screen"),
+                    clicks=1,
+                    button=step.get("button", "left"),
+                )
+            elif action == "move_mouse":
+                result = backend.move_mouse(
+                    step["x"],
+                    step["y"],
+                    step.get("relative_to", "screen"),
+                )
+            elif action == "focus_window":
                 result = backend.focus_window(step["title"])
             elif action == "hotkey":
                 result = backend.hotkey(step["keys"])
@@ -474,7 +608,11 @@ def _screenshot(backend: Any, args: argparse.Namespace) -> Any:
     if args.delay:
         time.sleep(args.delay)
     return backend.screenshot(
-        args.output, args.active_window, args.all_screens, args.region
+        args.output,
+        args.active_window,
+        args.all_screens,
+        args.region,
+        args.scale,
     )
 
 

@@ -4,16 +4,15 @@ Lite Computer Use is a lightweight Windows computer-use skill for host agents su
 
 The project deliberately has no DOM integration, Playwright, Selenium, OCR engine, accessibility-tree crawler, app-specific automation framework, autonomous agent loop, scheduler, or background workflow engine.
 
-## What changed in v1.3
+## What changed in v1.3.1
 
-v1.3 is a speed and token-efficiency release, not a larger automation system:
+v1.3.1 extends the v1.3 Fast Path with lower-latency discovery and vision:
 
-- Direct app, window, URL, file, and keyboard actions use a screenshot-free Fast Path.
-- Verification prefers compact OS state before visual input.
-- `sequence` combines up to eight safe deterministic steps into one Python process.
-- Unicode text defaults to zero delay and sends bounded batches of 128 UTF-16 units.
-- PyAutoGUI's global pause is reduced from 150 ms to a conservative 80 ms.
-- Every JSON response and redacted action log includes `durationMs` for measurement.
+- Screenshots can be downscaled to 25–100% for a cheap preview before a precise region capture.
+- Installed apps are indexed from Start Menu shortcuts and Windows App Paths, then cached for 24 hours.
+- Window matching can use process basenames after title matching, without exposing executable paths.
+- `sequence` now covers launch, bounded wait, move, and single-click steps as well as keyboard actions.
+- The agent-facing `SKILL.md` is shorter; detailed contracts and troubleshooting stay here.
 
 The main rule is: **screenshot is fallback, not default**. Token savings come from fewer images, smaller visual scope, fewer model/tool turns, and deterministic actions—not from guessing at image compression ratios.
 
@@ -51,7 +50,7 @@ py -3.13 scripts/lcu_tools.py list_apps
 Expected shape:
 
 ```json
-{"ok":true,"action":"list_apps","result":{"apps":["chrome"]},"meta":{"durationMs":1.234}}
+{"ok":true,"action":"list_apps","result":{"apps":["chrome","Discord"],"registeredCount":19,"indexedCount":42,"cacheRefreshed":true},"meta":{"durationMs":18.234}}
 ```
 
 Every invocation prints exactly one JSON object. Expected failures exit with code `2`; unexpected failures exit with code `3`.
@@ -98,7 +97,7 @@ Run commands from the skill root so the bundled configuration is resolved indepe
 ```powershell
 # Observe
 py -3.13 scripts/lcu_tools.py screenshot
-py -3.13 scripts/lcu_tools.py screenshot --active-window --delay 1
+py -3.13 scripts/lcu_tools.py screenshot --active-window --scale 0.5
 py -3.13 scripts/lcu_tools.py screenshot --region 500 300 800 600
 py -3.13 scripts/lcu_tools.py get_active_window
 py -3.13 scripts/lcu_tools.py list_windows
@@ -122,6 +121,8 @@ py -3.13 scripts/lcu_tools.py wait_for_window "Calculator" --state active --time
 py -3.13 scripts/lcu_tools.py close_window "Notepad"
 
 # Apps, web, files, and folders
+py -3.13 scripts/lcu_tools.py list_apps
+py -3.13 scripts/lcu_tools.py list_apps --refresh
 py -3.13 scripts/lcu_tools.py launch_app chrome
 py -3.13 scripts/lcu_tools.py open_url "https://www.naver.com"
 py -3.13 scripts/lcu_tools.py find_file "contract" --limit 10
@@ -173,11 +174,14 @@ This removes patterns such as screenshot → `Ctrl+L` → screenshot → type �
 
 Capture in this order:
 
-1. `screenshot --active-window`
-2. primary-screen `screenshot`
-3. `screenshot --all-screens`
+1. `screenshot --active-window --scale 0.5` for a broad preview.
+2. Primary-screen `screenshot --scale 0.5` if the target is outside the active window.
+3. `screenshot --all-screens --scale 0.5` only when the monitor is unknown.
+4. `screenshot --region X Y WIDTH HEIGHT --scale 1` when the target needs detail.
 
 Use the smallest scope that still contains the target. After a visual click, capture again only if the outcome is ambiguous, can branch, or is important to verify.
+
+`--scale` accepts `0.25` through `1.0` and returns `width`, `height`, `originalWidth`, `originalHeight`, and `scale`. Downscaling uses bilinear resampling. Do not pass raw coordinates from a scaled image to an input action; take a full-scale region capture first so the host does not need repeated coordinate conversion.
 
 Active-window image coordinates start at `(0, 0)`. Keep the same window active and pass `--relative-to active-window` to `click`, `double_click`, `move_mouse`, or `drag`. `--region X Y WIDTH HEIGHT` instead uses virtual-desktop screen coordinates and cannot be combined with `--active-window` or `--all-screens`.
 
@@ -187,7 +191,11 @@ Active-window image coordinates start at `(0, 0)`. Keep the same window active a
 
 Allowed actions:
 
+- `launch_app`
+- `wait_for_window`
 - `focus_window`
+- `move_mouse`
+- `click` (single click only)
 - `hotkey`
 - `press_key`
 - `type_text`
@@ -198,7 +206,7 @@ Rules:
 - The JSON value must be an array containing 1–8 action objects.
 - Every step and field is validated before execution begins.
 - Steps run in order and stop on the first LCU error.
-- There are no conditions, branches, loops, retries, screenshots, clipboard actions, app launches, file actions, or arbitrary Python/shell execution.
+- There are no conditions, branches, loops, retries, screenshots, clipboard or file actions, drags, double-clicks, or arbitrary Python/shell execution.
 - A failure exits with code `2`; `result.completed`, `result.failedIndex`, and ordered prior results describe partial execution.
 
 Example success:
@@ -233,7 +241,7 @@ py -3.13 scripts/lcu_tools.py type_text "한글 입력 테스트" --interval 0.0
 
 ## App configuration
 
-Trusted app aliases and launch commands live in `config/apps.yaml`. `launch_app` accepts only registered apps; there is no arbitrary command or shell-execution primitive.
+Trusted app aliases and launch commands live in `config/apps.yaml`. They have exact-match priority. When no configured alias matches, `launch_app` checks an installed-app index built from Start Menu `.lnk` files and the current-user/machine Windows App Paths registry keys. Exact indexed names win; a partial name or process match must be unique or returns `ambiguous_app`.
 
 ```yaml
 apps:
@@ -242,7 +250,11 @@ apps:
     commands: [MyApp.exe]
 ```
 
-The launcher checks `PATH`, Windows App Paths, and Windows application aliases. It returns an error rather than guessing through the Start menu.
+The index is cached at `%LOCALAPPDATA%\LiteComputerUse\cache\apps.json` for 24 hours. `list_apps` uses the cache; run `list_apps --refresh` after installing, removing, or renaming apps. Discovery happens only during a command—there is no watcher, daemon, or background refresh. Public results and logs omit executable and shortcut paths, and there is still no arbitrary command or shell-execution primitive.
+
+## Window resolution
+
+`list_windows` returns visible titled windows with `pid` and a lowercase process basename such as `chrome.exe`; process lookup failures return `null` without aborting enumeration. Full executable paths are never returned. Window actions resolve in this order: exact title, exact configured app/process alias, partial title, then partial process. An active match breaks a tie; otherwise multiple matches return `ambiguous_window`.
 
 ## Files and folders
 
@@ -260,13 +272,15 @@ Lite Computer Use does not inspect DOM nodes, control developer tools, install a
 
 Screenshots are stored under `%TEMP%\LiteComputerUse\screenshots` and files older than 24 hours are cleaned when a new screenshot is taken.
 
+The installed-app cache is stored under `%LOCALAPPDATA%\LiteComputerUse\cache` and is rebuilt after 24 hours or with `list_apps --refresh`.
+
 Redacted action logs are stored at `%LOCALAPPDATA%\LiteComputerUse\logs\actions.jsonl`. Each entry records UTC time, action name, success, minimal redacted metadata, and non-negative `durationMs`. Typed text, clipboard text, complete paths, complete URLs, complete window titles, and screenshot pixels are never logged. Sequence logs store only the JSON payload length.
 
 `durationMs` measures local execution after CLI argument parsing and includes action-lock acquisition. It is not the model's end-to-end latency and does not estimate host or vision tokens.
 
 ## Safety
 
-Within the user's request, the host may capture the screen, inspect or focus windows, launch registered apps, open normal documents or known websites, search, navigate menus, scroll, move or resize windows, perform harmless drags, open folders, and reveal files.
+Within the user's request, the host may capture the screen, inspect or focus windows, launch configured or uniquely indexed installed apps, open normal documents or known websites, search, navigate menus, scroll, move or resize windows, perform harmless drags, open folders, and reveal files.
 
 The host must ask immediately before a final action that sends or submits data; makes a purchase, payment, booking, or agreement; deletes data; overwrites a file; installs software; or changes security/system settings.
 
@@ -297,9 +311,9 @@ Install dependencies into the same Python 3.13 runtime used for commands:
 py -3.13 -m pip install -r requirements.txt
 ```
 
-### `app_not_registered`
+### `app_not_found` or `ambiguous_app`
 
-Use `list_apps`, then add a trusted alias and launch command to `config/apps.yaml`. There is intentionally no arbitrary executable or shell-command argument.
+Run `list_apps --refresh`. For ambiguity, use the exact listed app name; for a missing app, add a trusted exact alias and command to `config/apps.yaml`. There is intentionally no arbitrary executable or shell-command argument.
 
 ### `window_not_found` or `ambiguous_window`
 
@@ -350,4 +364,4 @@ Real mouse, keyboard, screenshot, Explorer, and window behavior must also be che
 
 ## Performance benchmark
 
-Use the repeatable B1–B8 procedure and record template in [`docs/performance.md`](docs/performance.md). Compare success rate first, then screenshot count, vision use, CLI invocations, retries, `meta.durationMs`, and end-to-end time. Do not accept a faster result that lowers reliability or weakens the safety boundary.
+Use the repeatable L1–L7 procedure and record template in [`docs/performance.md`](docs/performance.md). Compare success rate first, then screenshot pixels, vision use, CLI invocations, retries, `meta.durationMs`, and end-to-end time. Do not accept a faster result that lowers reliability or weakens the safety boundary.

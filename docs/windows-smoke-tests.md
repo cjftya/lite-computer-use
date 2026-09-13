@@ -8,6 +8,7 @@ Start with automated checks:
 py -3.13 -m unittest discover -s tests -v
 py -3.13 -m compileall scripts tests
 py -3.13 scripts/lcu_tools.py list_apps
+py -3.13 scripts/lcu_tools.py list_apps --refresh
 ```
 
 Record each item as pass, fail, or blocked.
@@ -31,7 +32,7 @@ Record each item as pass, fail, or blocked.
 
 ## Windows and waiting
 
-1. Launch Notepad and confirm `list_windows` includes accurate `active`, `minimized`, and `bounds` fields.
+1. Launch Notepad and confirm `list_windows` includes accurate `active`, `minimized`, `bounds`, `pid`, and process-basename fields without a full executable path.
 2. Open two similarly titled windows; confirm an ambiguous query returns `ambiguous_window` rather than selecting one.
 3. Maximize, restore, minimize, and restore Notepad with `set_window_state`.
 4. Move and resize Notepad with `set_window_bounds`.
@@ -40,6 +41,8 @@ Record each item as pass, fail, or blocked.
 7. Close Notepad and run `wait_for_window "Notepad" --state gone`.
 8. Wait for a missing test title with a short timeout; confirm `window_wait_timeout`.
 9. Modify an unsaved Notepad document and run `close_window`; confirm the normal save dialog appears and the process is not force-killed.
+10. Focus a window whose title omits its app name using the configured app/process alias.
+11. Inspect a protected process and confirm lookup failure returns `process:null` without dropping other windows.
 
 ## Screenshots
 
@@ -48,6 +51,9 @@ Record each item as pass, fail, or blocked.
 3. Capture a region on a monitor with negative coordinates.
 4. Confirm zero-sized and out-of-desktop regions are rejected.
 5. Confirm `--region` combined with `--active-window` or `--all-screens` is rejected.
+6. Capture the same screen with `--scale 1`, `0.5`, and `0.25`; confirm returned original/output dimensions and bilinear readability.
+7. Use a 0.5 preview to identify a target, then a scale-1 region for detail; do not reuse raw scaled-image coordinates.
+8. Confirm scales below 0.25, above 1.0, and non-finite values return `invalid_scale`.
 
 ## Apps, web, files, and folders
 
@@ -59,6 +65,10 @@ Record each item as pass, fail, or blocked.
 6. Confirm a missing folder and a file passed to `open_folder` return structured errors.
 7. Confirm an executable, script, shortcut, installer, or disk image passed to `open_file` is rejected.
 8. Confirm a non-HTTP URL such as `file:///...` is rejected.
+9. Launch a uniquely named installed app that is absent from `config/apps.yaml`; confirm the source is `start-menu` or `app-paths`.
+10. Confirm a configured alias wins over the installed-app index.
+11. Confirm a partial installed-app name with multiple matches returns `ambiguous_app`.
+12. Run `list_apps` twice and confirm the second call reuses the cache; then run `--refresh` and confirm `cacheRefreshed:true`.
 
 ## Antigravity scenarios
 
@@ -75,7 +85,7 @@ After installing the complete skill under `C:\Users\<USER>\.gemini\antigravity\s
 9. "현재 화면의 작은 팝업만 자세히 확인해줘."
 10. "메모장을 닫아줘."
 
-## v1.3 Fast Path and token checks
+## v1.3.1 Fast Path and token checks
 
 For each request, record CLI invocation count, screenshot count, screenshot scope, retries, `meta.durationMs`, and end-to-end time.
 
@@ -90,7 +100,7 @@ For each request, record CLI invocation count, screenshot count, screenshot scop
 
 Fail the check if the host takes a screenshot before and after every deterministic action, uses a full desktop image while the active window contains the target, or claims visual success without inspecting a needed image.
 
-## v1.3 sequence checks
+## v1.3.1 sequence checks
 
 1. Run address-bar focus → text → Enter as one sequence and confirm ordered results.
 2. Run a sequence with exactly eight allowed steps; confirm success.
@@ -98,5 +108,7 @@ Fail the check if the host takes a screenshot before and after every determinist
 4. Cause the second step to fail harmlessly; confirm `completed=1`, `failedIndex=1`, and no later action runs.
 5. Confirm typed text and window titles do not appear in `%LOCALAPPDATA%\LiteComputerUse\logs\actions.jsonl`.
 6. Confirm every successful and failed response contains non-negative `meta.durationMs`.
+7. Run launch → bounded wait → focus/move/click → keyboard actions in one sequence and confirm ordered results.
+8. Confirm `drag`, `double_click`, screenshots, file/clipboard actions, and retry/loop fields remain disallowed.
 
 For visually guided scenarios, use a fresh screenshot only when the result is ambiguous, can branch, or materially requires verification. Stop after one reasonable alternate-method retry rather than repeatedly guessing coordinates. Do not approve a send, submit, purchase, delete, overwrite, install, UAC, or security-warning action during smoke testing.

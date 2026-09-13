@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import shutil
 import struct
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from helpers import AppDefinition, LCUError
+from helpers import AppDefinition, AppRegistry, LCUError, normalize_name
 
 BLOCKED_OPEN_EXTENSIONS = {
     ".appref-ms",
@@ -119,7 +120,7 @@ class INPUT(ctypes.Structure):
 
 
 class WindowsBackend:
-    def __init__(self) -> None:
+    def __init__(self, app_registry: AppRegistry | None = None) -> None:
         if os.name != "nt":
             raise LCUError("unsupported_platform", "Lite Computer Use requires Windows")
 
@@ -132,7 +133,8 @@ class WindowsBackend:
             import win32clipboard
             import win32con
             import win32gui
-            from PIL import ImageGrab
+            import win32process
+            from PIL import Image, ImageGrab
         except ImportError as exc:
             raise LCUError(
                 "dependency_missing",
@@ -146,7 +148,10 @@ class WindowsBackend:
         self.win32clipboard = win32clipboard
         self.win32con = win32con
         self.win32gui = win32gui
+        self.win32process = win32process
+        self.Image = Image
         self.ImageGrab = ImageGrab
+        self.app_registry = app_registry
 
         self.pyautogui.FAILSAFE = True
         # A short global pause keeps interactive desktop actions reliable while
@@ -223,7 +228,12 @@ class WindowsBackend:
         active_window: bool,
         all_screens: bool,
         region: list[int] | tuple[int, int, int, int] | None = None,
+        scale: float = 1.0,
     ) -> dict[str, Any]:
+        if not math.isfinite(scale) or not 0.25 <= scale <= 1.0:
+            raise LCUError(
+                "invalid_scale", "Screenshot scale must be between 0.25 and 1.0"
+            )
         if active_window and all_screens:
             raise LCUError(
                 "invalid_screenshot_options",
@@ -280,11 +290,22 @@ class WindowsBackend:
 
         bbox = (bounds["left"], bounds["top"], bounds["right"], bounds["bottom"])
         image = self.ImageGrab.grab(bbox=bbox, all_screens=True)
+        original_width = image.width
+        original_height = image.height
+        if scale < 1.0:
+            size = (
+                max(1, round(original_width * scale)),
+                max(1, round(original_height * scale)),
+            )
+            image = image.resize(size, self.Image.Resampling.BILINEAR)
         image.save(output, format="PNG")
         return {
             "path": str(output),
             "width": image.width,
             "height": image.height,
+            "originalWidth": original_width,
+            "originalHeight": original_height,
+            "scale": scale,
             "bounds": bounds,
             "imageCoordinateSpace": "active-window" if active_window else "screen",
             "activeWindow": title,
@@ -544,6 +565,7 @@ class WindowsBackend:
     def list_windows(self) -> list[dict[str, Any]]:
         active_hwnd = self.win32gui.GetForegroundWindow()
         windows: list[dict[str, Any]] = []
+        process_cache: dict[int, str | None] = {}
 
         def callback(hwnd: int, _: Any) -> bool:
             if not self.win32gui.IsWindowVisible(hwnd):
@@ -551,12 +573,15 @@ class WindowsBackend:
             title = self.win32gui.GetWindowText(hwnd).strip()
             if not title:
                 return True
+            pid, process = self._window_identity(hwnd, process_cache)
             windows.append(
                 {
                     "hwnd": int(hwnd),
                     "title": title,
                     "active": hwnd == active_hwnd,
                     "minimized": bool(self.win32gui.IsIconic(hwnd)),
+                    "pid": pid,
+                    "process": process,
                     "bounds": self._window_bounds(hwnd),
                 }
             )
@@ -564,6 +589,56 @@ class WindowsBackend:
 
         self.win32gui.EnumWindows(callback, None)
         return windows
+
+    def _window_identity(
+        self,
+        hwnd: int,
+        process_cache: dict[int, str | None] | None = None,
+    ) -> tuple[int | None, str | None]:
+        try:
+            _, pid = self.win32process.GetWindowThreadProcessId(hwnd)
+        except Exception:
+            return None, None
+        pid = int(pid)
+        if process_cache is not None and pid in process_cache:
+            return pid, process_cache[pid]
+        try:
+            process = self._process_basename(pid)
+        except Exception:
+            process = None
+        if process_cache is not None:
+            process_cache[pid] = process
+        return pid, process
+
+    @staticmethod
+    def _process_basename(pid: int) -> str | None:
+        kernel32 = ctypes.windll.kernel32
+        query_limited_information = 0x1000
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(query_limited_information, False, pid)
+        if not handle:
+            return None
+        try:
+            buffer = ctypes.create_unicode_buffer(32_768)
+            size = wintypes.DWORD(len(buffer))
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)
+            ):
+                return None
+            return Path(buffer.value).name.casefold() or None
+        finally:
+            kernel32.CloseHandle(handle)
 
     def _window_bounds(self, hwnd: int) -> dict[str, int]:
         left, top, right, bottom = self.win32gui.GetWindowRect(hwnd)
@@ -577,18 +652,39 @@ class WindowsBackend:
         }
 
     def _resolve_window(self, query: str) -> dict[str, Any]:
-        needle = " ".join(query.casefold().split())
+        needle = normalize_name(query)
         if not needle:
             raise LCUError("invalid_window_query", "Window title query cannot be empty")
         windows = self.list_windows()
-        exact = [
-            window
-            for window in windows
-            if " ".join(window["title"].casefold().split()) == needle
-        ]
-        candidates = exact or [
-            window for window in windows if needle in window["title"].casefold()
-        ]
+        aliases = {needle, normalize_name(Path(query).stem)}
+        app_registry = getattr(self, "app_registry", None)
+        if app_registry is not None:
+            aliases.update(app_registry.process_names_for(query))
+
+        def normalized_process(window: dict[str, Any]) -> tuple[str, str]:
+            process = normalize_name(window.get("process") or "")
+            return process, normalize_name(Path(process).stem)
+
+        stages = (
+            [window for window in windows if normalize_name(window["title"]) == needle],
+            [
+                window
+                for window in windows
+                if any(value in aliases for value in normalized_process(window))
+            ],
+            [window for window in windows if needle in normalize_name(window["title"])],
+            [
+                window
+                for window in windows
+                if any(
+                    alias in value
+                    for value in normalized_process(window)
+                    for alias in aliases
+                    if alias
+                )
+            ],
+        )
+        candidates = next((stage for stage in stages if stage), [])
         if not candidates:
             raise LCUError("window_not_found", f"No window matched: {query}")
         active_matches = [window for window in candidates if window["active"]]
@@ -597,8 +693,11 @@ class WindowsBackend:
         elif len(candidates) > 1:
             raise LCUError(
                 "ambiguous_window",
-                "Multiple windows matched; use a more specific title",
-                candidates=[window["title"] for window in candidates],
+                "Multiple windows matched; use a more specific title or app name",
+                candidates=[
+                    {"title": window["title"], "process": window.get("process")}
+                    for window in candidates
+                ],
             )
 
         return candidates[0]
@@ -732,14 +831,25 @@ class WindowsBackend:
         for command in app.commands:
             try:
                 launched = self._launch_command(command)
-                return {"name": app.name, "command": launched}
+                result = {"name": app.name, "source": app.source}
+                if app.source == "registry":
+                    result["command"] = launched
+                return result
             except OSError as exc:
-                failures.append(f"{command}: {exc}")
+                if app.source == "registry":
+                    failures.append(f"{command}: {exc}")
+                else:
+                    failures.append(f"OS error {exc.errno or 'unknown'}")
+        details: dict[str, Any] = {
+            "source": app.source,
+            "failures": failures,
+        }
+        if app.source == "registry":
+            details["attempted"] = list(app.commands)
         raise LCUError(
             "app_launch_failed",
-            f"Could not launch registered app: {app.name}",
-            attempted=list(app.commands),
-            failures=failures,
+            f"Could not launch app: {app.name}",
+            **details,
         )
 
     def _launch_command(self, command: str) -> str:

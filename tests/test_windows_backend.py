@@ -12,7 +12,7 @@ from unittest.mock import Mock, call, patch
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from helpers import LCUError
+from helpers import AppDefinition, LCUError
 from windows_backend import INPUT, WindowsBackend
 
 
@@ -82,6 +82,7 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
         )
         backend.win32gui = Mock()
         backend.pywintypes = SimpleNamespace(error=RuntimeError)
+        backend.app_registry = None
         backend.screen_bounds = Mock(
             return_value={
                 "left": -1920,
@@ -216,6 +217,33 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
             backend.screenshot(None, True, False, [0, 0, 100, 100])
         self.assertEqual("invalid_screenshot_options", context.exception.code)
 
+    def test_screenshot_scale_resizes_with_bilinear_and_reports_both_sizes(self) -> None:
+        backend = self.make_backend()
+        original = Mock(width=200, height=100)
+        resized = Mock(width=100, height=50)
+        original.resize.return_value = resized
+        backend.ImageGrab = SimpleNamespace(grab=Mock(return_value=original))
+        backend.Image = SimpleNamespace(
+            Resampling=SimpleNamespace(BILINEAR="bilinear")
+        )
+        backend.active_window = Mock(side_effect=LCUError("none", "none"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "scaled.png"
+            result = backend.screenshot(output, False, False, scale=0.5)
+
+        original.resize.assert_called_once_with((100, 50), "bilinear")
+        resized.save.assert_called_once_with(output, format="PNG")
+        self.assertEqual(100, result["width"])
+        self.assertEqual(200, result["originalWidth"])
+        self.assertEqual(0.5, result["scale"])
+
+    def test_screenshot_scale_is_bounded(self) -> None:
+        backend = self.make_backend()
+        for scale in (0.24, 1.01, float("nan")):
+            with self.subTest(scale=scale), self.assertRaises(LCUError) as context:
+                backend.screenshot(None, False, False, scale=scale)
+            self.assertEqual("invalid_scale", context.exception.code)
+
     def test_list_windows_includes_bounds(self) -> None:
         backend = self.make_backend()
         backend.win32gui.GetForegroundWindow.return_value = 7
@@ -223,6 +251,7 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
         backend.win32gui.GetWindowText.return_value = "Notepad"
         backend.win32gui.IsIconic.return_value = False
         backend.win32gui.GetWindowRect.return_value = (-100, 20, 700, 620)
+        backend._window_identity = Mock(return_value=(123, "notepad.exe"))
 
         def enumerate_windows(callback: object, parameter: object) -> None:
             callback(7, parameter)
@@ -231,6 +260,69 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
         windows = backend.list_windows()
         self.assertEqual(800, windows[0]["bounds"]["width"])
         self.assertEqual(-100, windows[0]["bounds"]["left"])
+        self.assertEqual(123, windows[0]["pid"])
+        self.assertEqual("notepad.exe", windows[0]["process"])
+
+    def test_window_identity_failure_does_not_break_enumeration(self) -> None:
+        backend = self.make_backend()
+        backend.win32gui.GetForegroundWindow.return_value = 0
+        backend.win32gui.IsWindowVisible.return_value = True
+        backend.win32gui.GetWindowText.return_value = "Protected app"
+        backend.win32gui.IsIconic.return_value = False
+        backend.win32gui.GetWindowRect.return_value = (0, 0, 100, 100)
+        backend._window_identity = Mock(return_value=(456, None))
+        backend.win32gui.EnumWindows.side_effect = lambda callback, value: callback(
+            9, value
+        )
+
+        windows = backend.list_windows()
+
+        self.assertEqual(456, windows[0]["pid"])
+        self.assertIsNone(windows[0]["process"])
+
+    def test_list_windows_reuses_process_lookup_for_shared_pid(self) -> None:
+        backend = self.make_backend()
+        backend.win32process = Mock()
+        backend.win32process.GetWindowThreadProcessId.return_value = (1, 123)
+        backend._process_basename = Mock(return_value="chrome.exe")
+        backend.win32gui.GetForegroundWindow.return_value = 1
+        backend.win32gui.IsWindowVisible.return_value = True
+        backend.win32gui.GetWindowText.side_effect = lambda hwnd: f"Window {hwnd}"
+        backend.win32gui.IsIconic.return_value = False
+        backend.win32gui.GetWindowRect.return_value = (0, 0, 100, 100)
+
+        def enumerate_windows(callback: object, parameter: object) -> None:
+            callback(1, parameter)
+            callback(2, parameter)
+
+        backend.win32gui.EnumWindows.side_effect = enumerate_windows
+
+        windows = backend.list_windows()
+
+        self.assertEqual(2, len(windows))
+        backend._process_basename.assert_called_once_with(123)
+
+    def test_window_resolver_matches_process_after_title_stages(self) -> None:
+        backend = self.make_backend()
+        backend.list_windows = Mock(
+            return_value=[
+                {
+                    "hwnd": 1,
+                    "title": "Inbox",
+                    "active": False,
+                    "process": "chrome.exe",
+                },
+                {
+                    "hwnd": 2,
+                    "title": "Chrome settings",
+                    "active": False,
+                    "process": "other.exe",
+                },
+            ]
+        )
+        self.assertEqual(1, backend._resolve_window("chrome.exe")["hwnd"])
+        self.assertEqual(1, backend._resolve_window("Chrome")["hwnd"])
+        self.assertEqual(2, backend._resolve_window("settings")["hwnd"])
 
     def test_window_resolver_prefers_exact_then_active(self) -> None:
         backend = self.make_backend()
@@ -322,6 +414,20 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
             with self.assertRaises(LCUError) as context:
                 WindowsBackend.open_file(str(shortcut))
         self.assertEqual("executable_file_blocked", context.exception.code)
+
+    def test_indexed_launch_response_does_not_expose_target_path(self) -> None:
+        backend = self.make_backend()
+        backend._launch_command = Mock(return_value=r"C:\Private\Discord.exe")
+        app = AppDefinition(
+            "Discord",
+            ("Discord",),
+            (r"C:\Private\Discord.exe",),
+            source="app-paths",
+        )
+
+        result = backend.launch_app(app)
+
+        self.assertEqual({"name": "Discord", "source": "app-paths"}, result)
 
 
 if __name__ == "__main__":
