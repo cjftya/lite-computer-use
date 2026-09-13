@@ -232,7 +232,7 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
             result = backend.screenshot(output, False, False, scale=0.5)
 
         original.resize.assert_called_once_with((100, 50), "bilinear")
-        resized.save.assert_called_once_with(output, format="PNG")
+        resized.save.assert_called_once_with(Path(result["path"]), format="PNG")
         self.assertEqual(100, result["width"])
         self.assertEqual(200, result["originalWidth"])
         self.assertEqual(0.5, result["scale"])
