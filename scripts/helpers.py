@@ -191,7 +191,7 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if action == "open_url":
         url = str(arguments.get("url", ""))
         return {"host": urlsplit(url).hostname or ""}
-    if action == "open_file":
+    if action in {"open_file", "open_folder", "reveal_file"}:
         value = Path(str(arguments.get("path", "")))
         return {"extension": value.suffix.casefold()}
     if action in {"click", "double_click"}:
@@ -199,15 +199,47 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
             "x": arguments.get("x"),
             "y": arguments.get("y"),
             "relative_to": arguments.get("relative_to", "screen"),
+            "button": arguments.get("button", "left"),
+        }
+    if action == "move_mouse":
+        return {
+            "x": arguments.get("x"),
+            "y": arguments.get("y"),
+            "relative_to": arguments.get("relative_to", "screen"),
+        }
+    if action == "drag":
+        return {
+            "start_x": arguments.get("start_x"),
+            "start_y": arguments.get("start_y"),
+            "end_x": arguments.get("end_x"),
+            "end_y": arguments.get("end_y"),
+            "duration": arguments.get("duration"),
+            "button": arguments.get("button", "left"),
+            "relative_to": arguments.get("relative_to", "screen"),
         }
     if action == "launch_app":
         return {"name": arguments.get("name")}
-    if action == "focus_window":
-        return {"query_length": len(str(arguments.get("title", "")))}
+    if action in {
+        "focus_window",
+        "set_window_state",
+        "set_window_bounds",
+        "close_window",
+        "wait_for_window",
+    }:
+        details = {"query_length": len(str(arguments.get("title", "")))}
+        for key in ("state", "width", "height", "timeout"):
+            if key in arguments:
+                details[key] = arguments[key]
+        return details
     if action == "scroll":
         return {"amount": arguments.get("amount")}
     if action in {"press_key", "hotkey"}:
-        return {"keys": arguments.get("keys") or arguments.get("key")}
+        details = {"keys": arguments.get("keys") or arguments.get("key")}
+        if action == "press_key":
+            details["count"] = arguments.get("count", 1)
+        return details
+    if action == "screenshot" and arguments.get("region"):
+        return {"region": arguments["region"]}
     return {}
 
 

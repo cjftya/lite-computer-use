@@ -42,6 +42,37 @@ class CLITests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual("list_apps", payload["action"])
 
+    @unittest.skipIf(os.name == "nt", "Parser-only platform test")
+    def test_new_command_aliases_parse(self) -> None:
+        commands = (
+            ("move-mouse", "1", "2"),
+            ("open-folder", "."),
+            ("reveal-file", "example.txt"),
+            ("get-mouse-position",),
+            ("set-window-state", "Notepad", "maximize"),
+            ("set-window-bounds", "Notepad", "0", "0", "800", "600"),
+            ("close-window", "Notepad"),
+            ("wait-for-window", "Notepad"),
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                completed = self.run_cli(*command)
+                self.assertEqual(2, completed.returncode)
+                payload = json.loads(completed.stdout)
+                self.assertEqual(
+                    command[0].replace("-", "_"), payload["action"]
+                )
+                self.assertEqual("unsupported_platform", payload["error"]["code"])
+
+    def test_region_and_active_window_are_rejected_by_backend_contract(self) -> None:
+        completed = self.run_cli(
+            "screenshot", "--region", "0", "0", "100", "100", "--active-window"
+        )
+        if os.name != "nt":
+            self.assertEqual(2, completed.returncode)
+            payload = json.loads(completed.stdout)
+            self.assertEqual("unsupported_platform", payload["error"]["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,15 @@ class SafetyTests(unittest.TestCase):
     def test_normalize_name_collapses_case_and_spaces(self) -> None:
         self.assertEqual("google chrome", normalize_name(" Google   Chrome "))
 
+    def test_window_logs_do_not_include_title(self) -> None:
+        secret_title = "Confidential merger notes"
+        details = safe_log_details(
+            "set_window_bounds",
+            {"title": secret_title, "x": 0, "y": 0, "width": 800, "height": 600},
+        )
+        self.assertNotIn(secret_title, json.dumps(details))
+        self.assertEqual(len(secret_title), details["query_length"])
+
     def test_action_lock_rejects_concurrent_owner(self) -> None:
         with (
             ActionLock(timeout=0.1),

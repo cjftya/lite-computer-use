@@ -4,6 +4,7 @@ import ctypes
 import os
 import shutil
 import struct
+import subprocess
 import tempfile
 import time
 import webbrowser
@@ -120,9 +121,7 @@ class INPUT(ctypes.Structure):
 class WindowsBackend:
     def __init__(self) -> None:
         if os.name != "nt":
-            raise LCUError(
-                "unsupported_platform", "Lite Computer Use v1 requires Windows"
-            )
+            raise LCUError("unsupported_platform", "Lite Computer Use requires Windows")
 
         self._enable_dpi_awareness()
         self._attach_to_default_desktop()
@@ -137,7 +136,8 @@ class WindowsBackend:
         except ImportError as exc:
             raise LCUError(
                 "dependency_missing",
-                f"Missing Windows dependency: {exc.name}. Run: python -m pip install -r requirements.txt",
+                f"Missing Windows dependency: {exc.name}. "
+                "Run: py -3.13 -m pip install -r requirements.txt",
             ) from exc
 
         self.pyautogui = pyautogui
@@ -216,9 +216,30 @@ class WindowsBackend:
         }
 
     def screenshot(
-        self, output: Path | None, active_window: bool, all_screens: bool
+        self,
+        output: Path | None,
+        active_window: bool,
+        all_screens: bool,
+        region: list[int] | tuple[int, int, int, int] | None = None,
     ) -> dict[str, Any]:
-        if active_window:
+        if active_window and all_screens:
+            raise LCUError(
+                "invalid_screenshot_options",
+                "--active-window and --all-screens cannot be used together",
+            )
+        if region is not None and (active_window or all_screens):
+            raise LCUError(
+                "invalid_screenshot_options",
+                "--region cannot be combined with --active-window or --all-screens",
+            )
+
+        if region is not None:
+            bounds = self._region_bounds(region)
+            try:
+                title = self.active_window().get("title", "")
+            except LCUError:
+                title = ""
+        elif active_window:
             active = self.active_window()
             bounds = active["bounds"]
             if bounds["width"] <= 0 or bounds["height"] <= 0:
@@ -266,6 +287,39 @@ class WindowsBackend:
             "imageCoordinateSpace": "active-window" if active_window else "screen",
             "activeWindow": title,
             "activeWindowOnly": active_window,
+            "regionOnly": region is not None,
+        }
+
+    def _region_bounds(
+        self, region: list[int] | tuple[int, int, int, int]
+    ) -> dict[str, int]:
+        if len(region) != 4:
+            raise LCUError("invalid_region", "Region must contain x, y, width, height")
+        x, y, width, height = region
+        if width <= 0 or height <= 0:
+            raise LCUError(
+                "invalid_region", "Region width and height must be greater than zero"
+            )
+        desktop = self.screen_bounds(primary_only=False)
+        if (
+            x < desktop["left"]
+            or y < desktop["top"]
+            or x + width > desktop["right"]
+            or y + height > desktop["bottom"]
+        ):
+            raise LCUError(
+                "region_out_of_bounds",
+                "Screenshot region is outside the virtual desktop",
+                region={"x": x, "y": y, "width": width, "height": height},
+                bounds=desktop,
+            )
+        return {
+            "left": x,
+            "top": y,
+            "right": x + width,
+            "bottom": y + height,
+            "width": width,
+            "height": height,
         }
 
     @staticmethod
@@ -311,13 +365,73 @@ class WindowsBackend:
         return x, y
 
     def click(
-        self, x: int, y: int, relative_to: str = "screen", clicks: int = 1
+        self,
+        x: int,
+        y: int,
+        relative_to: str = "screen",
+        clicks: int = 1,
+        button: str = "left",
     ) -> dict[str, Any]:
+        button = self._validate_mouse_button(button)
         x, y = self._absolute_point(x, y, relative_to)
         self.pyautogui.click(
-            x=x, y=y, clicks=clicks, interval=0.12 if clicks > 1 else 0
+            x=x,
+            y=y,
+            clicks=clicks,
+            interval=0.12 if clicks > 1 else 0,
+            button=button,
         )
-        return {"x": x, "y": y, "clicks": clicks}
+        return {"x": x, "y": y, "clicks": clicks, "button": button}
+
+    @staticmethod
+    def _validate_mouse_button(button: str) -> str:
+        normalized = button.strip().casefold()
+        if normalized not in {"left", "right", "middle"}:
+            raise LCUError("invalid_mouse_button", f"Unsupported mouse button: {button}")
+        return normalized
+
+    def move_mouse(
+        self, x: int, y: int, relative_to: str = "screen"
+    ) -> dict[str, int]:
+        x, y = self._absolute_point(x, y, relative_to)
+        self.pyautogui.moveTo(x, y)
+        return {"x": x, "y": y}
+
+    def drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration: float = 0.5,
+        button: str = "left",
+        relative_to: str = "screen",
+    ) -> dict[str, Any]:
+        if not 0 <= duration <= 10:
+            raise LCUError(
+                "invalid_duration", "Drag duration must be between 0 and 10 seconds"
+            )
+        button = self._validate_mouse_button(button)
+        start = self._absolute_point(start_x, start_y, relative_to)
+        end = self._absolute_point(end_x, end_y, relative_to)
+        self.pyautogui.moveTo(*start)
+        try:
+            self.pyautogui.mouseDown(button=button)
+            self.pyautogui.moveTo(*end, duration=duration)
+        finally:
+            # Keep drag atomic: even a fail-safe or input error must not leave
+            # the desktop with a mouse button logically held down.
+            self.pyautogui.mouseUp(button=button)
+        return {
+            "start": {"x": start[0], "y": start[1]},
+            "end": {"x": end[0], "y": end[1]},
+            "duration": duration,
+            "button": button,
+        }
+
+    def get_mouse_position(self) -> dict[str, int]:
+        x, y = self.win32api.GetCursorPos()
+        return {"x": int(x), "y": int(y)}
 
     def scroll(self, amount: int) -> dict[str, int]:
         if amount == 0 or abs(amount) > 10_000:
@@ -334,10 +448,12 @@ class WindowsBackend:
             raise LCUError("invalid_key", f"Unsupported key: {key}")
         return normalized
 
-    def press_key(self, key: str) -> dict[str, str]:
+    def press_key(self, key: str, count: int = 1) -> dict[str, Any]:
+        if not 1 <= count <= 100:
+            raise LCUError("invalid_count", "Key press count must be between 1 and 100")
         normalized = self.normalize_key(key)
-        self.pyautogui.press(normalized)
-        return {"key": normalized}
+        self.pyautogui.press(normalized, presses=count)
+        return {"key": normalized, "count": count}
 
     def hotkey(self, keys: list[str]) -> dict[str, list[str]]:
         if not 2 <= len(keys) <= 5:
@@ -421,6 +537,7 @@ class WindowsBackend:
                     "title": title,
                     "active": hwnd == active_hwnd,
                     "minimized": bool(self.win32gui.IsIconic(hwnd)),
+                    "bounds": self._window_bounds(hwnd),
                 }
             )
             return True
@@ -428,7 +545,18 @@ class WindowsBackend:
         self.win32gui.EnumWindows(callback, None)
         return windows
 
-    def focus_window(self, query: str) -> dict[str, Any]:
+    def _window_bounds(self, hwnd: int) -> dict[str, int]:
+        left, top, right, bottom = self.win32gui.GetWindowRect(hwnd)
+        return {
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "width": max(0, right - left),
+            "height": max(0, bottom - top),
+        }
+
+    def _resolve_window(self, query: str) -> dict[str, Any]:
         needle = " ".join(query.casefold().split())
         if not needle:
             raise LCUError("invalid_window_query", "Window title query cannot be empty")
@@ -453,7 +581,10 @@ class WindowsBackend:
                 candidates=[window["title"] for window in candidates],
             )
 
-        target = candidates[0]
+        return candidates[0]
+
+    def focus_window(self, query: str) -> dict[str, Any]:
+        target = self._resolve_window(query)
         hwnd = target["hwnd"]
         if self.win32gui.IsIconic(hwnd):
             self.win32gui.ShowWindow(hwnd, self.win32con.SW_RESTORE)
@@ -469,6 +600,112 @@ class WindowsBackend:
             self.win32gui.BringWindowToTop(hwnd)
             self.win32gui.SetForegroundWindow(hwnd)
         return {"hwnd": hwnd, "title": target["title"]}
+
+    def set_window_state(self, query: str, state: str) -> dict[str, Any]:
+        commands = {
+            "restore": self.win32con.SW_RESTORE,
+            "minimize": self.win32con.SW_MINIMIZE,
+            "maximize": self.win32con.SW_MAXIMIZE,
+        }
+        try:
+            command = commands[state]
+        except KeyError as exc:
+            raise LCUError(
+                "invalid_window_state", f"Unknown window state: {state}"
+            ) from exc
+        target = self._resolve_window(query)
+        self.win32gui.ShowWindow(target["hwnd"], command)
+        return {"hwnd": target["hwnd"], "title": target["title"], "state": state}
+
+    def set_window_bounds(
+        self, query: str, x: int, y: int, width: int, height: int
+    ) -> dict[str, Any]:
+        if width <= 0 or height <= 0:
+            raise LCUError(
+                "invalid_window_bounds",
+                "Window width and height must be greater than zero",
+            )
+        desktop = self.screen_bounds(primary_only=False)
+        if (
+            x < desktop["left"]
+            or y < desktop["top"]
+            or x + width > desktop["right"]
+            or y + height > desktop["bottom"]
+        ):
+            raise LCUError(
+                "window_bounds_out_of_range",
+                "Requested window bounds are outside the virtual desktop",
+                requested={"x": x, "y": y, "width": width, "height": height},
+                bounds=desktop,
+            )
+        target = self._resolve_window(query)
+        if self.win32gui.IsIconic(target["hwnd"]) or self.win32gui.IsZoomed(
+            target["hwnd"]
+        ):
+            self.win32gui.ShowWindow(target["hwnd"], self.win32con.SW_RESTORE)
+        flags = self.win32con.SWP_NOZORDER | self.win32con.SWP_NOACTIVATE
+        self.win32gui.SetWindowPos(target["hwnd"], 0, x, y, width, height, flags)
+        return {
+            "hwnd": target["hwnd"],
+            "title": target["title"],
+            "bounds": {
+                "left": x,
+                "top": y,
+                "right": x + width,
+                "bottom": y + height,
+                "width": width,
+                "height": height,
+            },
+        }
+
+    def close_window(self, query: str) -> dict[str, Any]:
+        target = self._resolve_window(query)
+        self.win32gui.PostMessage(target["hwnd"], self.win32con.WM_CLOSE, 0, 0)
+        return {"hwnd": target["hwnd"], "title": target["title"], "requested": True}
+
+    def wait_for_window(
+        self, query: str, state: str = "present", timeout: float = 10.0
+    ) -> dict[str, Any]:
+        if state not in {"present", "gone", "active"}:
+            raise LCUError("invalid_window_state", f"Unknown wait state: {state}")
+        if not 0 < timeout <= 30:
+            raise LCUError(
+                "invalid_timeout",
+                "Window wait timeout must be greater than 0 and at most 30 seconds",
+            )
+
+        deadline = time.monotonic() + timeout
+        while True:
+            target: dict[str, Any] | None
+            try:
+                target = self._resolve_window(query)
+            except LCUError as exc:
+                if exc.code != "window_not_found":
+                    raise
+                target = None
+
+            matched = (
+                (state == "present" and target is not None)
+                or (state == "gone" and target is None)
+                or (state == "active" and target is not None and target["active"])
+            )
+            if matched:
+                if target is None:
+                    return {"found": False, "state": state}
+                return {
+                    "found": True,
+                    "hwnd": target["hwnd"],
+                    "title": target["title"],
+                    "state": state,
+                }
+            if time.monotonic() >= deadline:
+                raise LCUError(
+                    "window_wait_timeout",
+                    f"Timed out waiting for window state: {state}",
+                    state=state,
+                    timeout=timeout,
+                )
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
     def launch_app(self, app: AppDefinition) -> dict[str, str]:
         failures: list[str] = []
@@ -531,6 +768,26 @@ class WindowsBackend:
                 extension=path.suffix.casefold(),
             )
         os.startfile(str(path))
+        return {"path": str(path)}
+
+    @staticmethod
+    def open_folder(path_value: str) -> dict[str, str]:
+        path = Path(os.path.expandvars(path_value)).expanduser().resolve(strict=False)
+        if not path.exists():
+            raise LCUError("folder_not_found", f"Folder does not exist: {path}")
+        if not path.is_dir():
+            raise LCUError("not_a_folder", f"Path is not a folder: {path}")
+        os.startfile(str(path))
+        return {"path": str(path)}
+
+    @staticmethod
+    def reveal_file(path_value: str) -> dict[str, str]:
+        path = Path(os.path.expandvars(path_value)).expanduser().resolve(strict=False)
+        if not path.exists():
+            raise LCUError("file_not_found", f"File does not exist: {path}")
+        if not path.is_file():
+            raise LCUError("not_a_file", f"Path is not a file: {path}")
+        subprocess.Popen(["explorer.exe", f"/select,{path}"], close_fds=True)
         return {"path": str(path)}
 
     @staticmethod

@@ -1,43 +1,75 @@
 # Windows smoke tests
 
-Run these tests on a non-production Windows desktop with no sensitive data visible. Keep the pointer away from the upper-left fail-safe corner unless you intend to abort.
+Run these checks on a non-production Windows 11 desktop with no sensitive data visible. Use global Python 3.13, keep the pointer away from the upper-left fail-safe corner unless testing abort behavior, and record the display scale and monitor layout.
 
-Record each result as pass, fail, or blocked, along with the Windows display scale and monitor count.
+Start with automated checks:
 
-## Primitive checks
+```powershell
+py -3.13 -m unittest discover -s tests -v
+py -3.13 -m compileall scripts tests
+py -3.13 scripts/lcu_tools.py list_apps
+```
 
-1. `screenshot` returns a readable PNG with dimensions matching the captured desktop.
-2. `screenshot --active-window` returns a cropped image and accurate non-zero bounds.
-3. `click` selects a harmless desktop target at the expected coordinate.
-4. `click --relative-to active-window` maps a cropped-image coordinate correctly.
-5. `double_click` opens a harmless test file.
-6. Positive and negative `scroll` values move in opposite directions.
-7. `type_text` enters both `OpenAI test` and `한글 입력 테스트` correctly in Notepad.
-8. `press_key ESC` and `hotkey CTRL L` work in a suitable test app.
-9. Moving the pointer to the upper-left corner aborts a PyAutoGUI-driven action.
+Record each item as pass, fail, or blocked.
 
-## App, file, and window checks
+## Mouse and keyboard
 
-1. Launch Notepad from a closed state.
-2. List windows and confirm the active window marker is accurate.
-3. Minimize Notepad, then restore and focus it by title.
-4. Open `https://www.naver.com` in the default browser.
-5. Find a uniquely named PDF under Downloads and open it.
-6. Confirm that opening an executable, script, shortcut, installer, or disk image through `open_file` is rejected.
-7. Confirm that a non-HTTP URL such as `file:///...` is rejected.
-8. Confirm that an ambiguous window title returns candidates instead of choosing one.
+1. Open Paint and run `move_mouse`; confirm the pointer moves without clicking.
+2. Run left, right, and middle `click` on harmless targets; confirm the correct button is used.
+3. Run `click --relative-to active-window`; confirm cropped-image coordinates map correctly.
+4. Run `double_click` on a harmless test file.
+5. Draw a line and a four-edge rectangle in Paint with `drag`.
+6. Abort a drag by moving to the fail-safe corner; confirm the mouse button is released afterward.
+7. Drag a slider and a scrollbar; confirm duration and endpoints behave predictably.
+8. Confirm positive and negative `scroll` values move in opposite directions.
+9. Type `OpenAI test` and `한글 입력 테스트` in Notepad.
+10. Run `press_key TAB --count 4`, `press_key ESC`, and `hotkey CTRL L` in suitable apps.
+11. Run `get_mouse_position` and compare the returned coordinate with the visible pointer.
 
-## Agent scenarios
+## Windows and waiting
 
-Run each scenario at least five times with Claude Code, Gemini CLI, and Codex CLI:
+1. Launch Notepad and confirm `list_windows` includes accurate `active`, `minimized`, and `bounds` fields.
+2. Open two similarly titled windows; confirm an ambiguous query returns `ambiguous_window` rather than selecting one.
+3. Maximize, restore, minimize, and restore Notepad with `set_window_state`.
+4. Move and resize Notepad with `set_window_bounds`.
+5. On a second monitor left of the primary one, use negative X coordinates for `set_window_bounds`.
+6. Run `wait_for_window "Notepad" --state present` and `--state active`.
+7. Close Notepad and run `wait_for_window "Notepad" --state gone`.
+8. Wait for a missing test title with a short timeout; confirm `window_wait_timeout`.
+9. Modify an unsaved Notepad document and run `close_window`; confirm the normal save dialog appears and the process is not force-killed.
 
-1. "메모장 열어줘."
-2. "이미 열려 있는 크롬으로 이동해줘."
-3. "네이버 열어줘."
-4. "다운로드 폴더에서 최근 PDF 열어줘."
-5. "메모장에 테스트라고 입력해줘."
-6. "현재 화면을 보고 확인 버튼을 눌러줘."
-7. "크롬에서 네이버를 열고 OpenAI를 검색해줘."
-8. "이 PDF를 열고 인쇄 화면까지 띄워줘."
+## Screenshots
 
-For visually guided scenarios, verify that the agent observes again after a state-changing action and stops after one alternate-method retry rather than repeating clicks.
+1. Confirm full, active-window, and all-screen captures return readable PNGs with correct dimensions and bounds.
+2. Capture a small popup with `screenshot --region X Y WIDTH HEIGHT`; verify the PNG dimensions equal the requested width and height.
+3. Capture a region on a monitor with negative coordinates.
+4. Confirm zero-sized and out-of-desktop regions are rejected.
+5. Confirm `--region` combined with `--active-window` or `--all-screens` is rejected.
+
+## Apps, web, files, and folders
+
+1. Launch Calculator, Notepad, Paint, and Chrome from a closed state where installed.
+2. Open `https://www.naver.com` in the default browser.
+3. Find a uniquely named PDF under Downloads and open it.
+4. Open Downloads with `open_folder`.
+5. Use `reveal_file` on the test PDF; confirm Explorer opens with the file selected but the file does not launch.
+6. Confirm a missing folder and a file passed to `open_folder` return structured errors.
+7. Confirm an executable, script, shortcut, installer, or disk image passed to `open_file` is rejected.
+8. Confirm a non-HTTP URL such as `file:///...` is rejected.
+
+## Antigravity scenarios
+
+After installing the complete skill under `C:\Users\<USER>\.gemini\antigravity\skills\lite-computer-use`, fully restart Antigravity CLI and run:
+
+1. "계산기 열어서 100+400 해줘."
+2. "크롬을 열고 준비되면 네이버로 이동해줘."
+3. "그림판을 열어서 네모 하나 그려줘."
+4. "그림판에 간단한 집 모양을 그려줘."
+5. "크롬을 화면 왼쪽 절반에 놓고 메모장을 오른쪽 절반에 놓아줘."
+6. "다운로드 폴더 열어줘."
+7. "다운로드에 있는 test.pdf 위치 보여줘."
+8. "이 아이콘을 우클릭해줘."
+9. "현재 화면의 작은 팝업만 자세히 확인해줘."
+10. "메모장을 닫아줘."
+
+For visually guided scenarios, confirm the host follows Observe → Act → Verify, takes a fresh screenshot after a state change, and stops after one reasonable alternate-method retry rather than repeatedly guessing coordinates. Do not approve a send, submit, purchase, delete, overwrite, install, UAC, or security-warning action during smoke testing.
