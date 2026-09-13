@@ -6,11 +6,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.helpers import (
     ActionLock,
     AppRegistry,
     LCUError,
+    append_action_log,
     find_files,
     normalize_name,
     safe_log_details,
@@ -83,6 +85,24 @@ class SafetyTests(unittest.TestCase):
         )
         self.assertNotIn(secret_title, json.dumps(details))
         self.assertEqual(len(secret_title), details["query_length"])
+
+    def test_sequence_log_does_not_include_typed_text(self) -> None:
+        secret = "do-not-log-this-sequence-text"
+        payload = json.dumps([{"action": "type_text", "text": secret}])
+        details = safe_log_details("sequence", {"sequence_json": payload})
+        self.assertNotIn(secret, json.dumps(details))
+        self.assertEqual(len(payload), details["payload_length"])
+
+    def test_action_log_records_nonnegative_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("scripts.helpers.runtime_root", return_value=Path(temp_dir)):
+                append_action_log("hotkey", True, {"keys": ["ctrl", "l"]}, -1.0)
+            record = json.loads(
+                (Path(temp_dir) / "logs" / "actions.jsonl").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(0.0, record["durationMs"])
 
     def test_action_lock_rejects_concurrent_owner(self) -> None:
         with (

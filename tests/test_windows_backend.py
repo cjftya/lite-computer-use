@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -152,6 +152,47 @@ class WindowsBackendPrimitiveTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(LCUError) as context:
                 backend.press_key("TAB", invalid)
             self.assertEqual("invalid_count", context.exception.code)
+
+    def test_unicode_input_builds_key_down_and_up_for_surrogate_pair(self) -> None:
+        backend = self.make_backend()
+        events = backend._unicode_input_events((0xD83D, 0xDE00))
+        self.assertEqual(4, len(events))
+        self.assertEqual(0xD83D, events[0].ki.wScan)
+        self.assertEqual(0xDE00, events[2].ki.wScan)
+        self.assertEqual(0x0004, events[0].ki.dwFlags)
+        self.assertEqual(0x0006, events[1].ki.dwFlags)
+
+    def test_zero_interval_unicode_input_uses_bounded_batches(self) -> None:
+        backend = self.make_backend()
+        send_input = Mock(side_effect=lambda count, events, size: count)
+        user32 = SimpleNamespace(SendInput=send_input)
+        with patch.object(
+            ctypes, "windll", SimpleNamespace(user32=user32), create=True
+        ):
+            backend._send_unicode("a" * 130, 0.0)
+        self.assertEqual(2, send_input.call_count)
+        self.assertEqual([256, 4], [item.args[0] for item in send_input.call_args_list])
+        self.assertEqual(2, backend.pyautogui.failSafeCheck.call_count)
+
+    def test_type_text_preserves_newline_tab_and_empty_input(self) -> None:
+        backend = self.make_backend()
+        backend._send_unicode = Mock()
+        result = backend.type_text("한글\ttext\nnext")
+        self.assertEqual(12, result["length"])
+        self.assertEqual(
+            [call("한글", 0.0), call("text", 0.0), call("next", 0.0)],
+            backend._send_unicode.call_args_list,
+        )
+        self.assertEqual([call("tab"), call("enter")], backend.pyautogui.press.call_args_list)
+
+        result = backend.type_text("")
+        self.assertEqual(0, result["length"])
+
+    def test_type_text_enforces_length_limit(self) -> None:
+        backend = self.make_backend()
+        with self.assertRaises(LCUError) as context:
+            backend.type_text("x" * 10_001)
+        self.assertEqual("text_too_long", context.exception.code)
 
     def test_region_accepts_negative_monitor_coordinates(self) -> None:
         backend = self.make_backend()

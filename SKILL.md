@@ -5,7 +5,7 @@ description: Control a local interactive Windows desktop with small app, file, w
 
 # Lite Computer Use
 
-Use the bundled `scripts/lcu_tools.py` primitives for small Windows desktop tasks. You interpret screenshots and decide the next action; Python executes only the requested primitive and returns one JSON object.
+Use the bundled `scripts/lcu_tools.py` primitives for small Windows desktop tasks. Prefer direct actions and text state; screenshots are a fallback. You interpret any screenshot and decide the next action, while Python only executes bounded primitives and returns one compact JSON object.
 
 ## Runtime
 
@@ -17,27 +17,50 @@ Requires Python 3.11 or later. On Windows, use the recommended global Python 3.1
 py -3.13 scripts/lcu_tools.py <action> [arguments]
 ```
 
-Exit code `0` with `"ok":true` means the primitive ran. It does not prove the user's end goal succeeded; verify the resulting UI state when it matters. Expected LCU errors exit with code `2`, and unexpected errors exit with code `3`.
+Exit code `0` with `"ok":true` means the primitive ran. Each response includes `meta.durationMs`. Expected LCU errors exit with code `2`, and unexpected errors exit with code `3`.
 
-## Action choice
+## Fast Path first
 
 Prefer, in order:
 
 1. A direct deterministic primitive such as focus, launch, open file, open folder, reveal file, or open URL.
-2. Keyboard navigation or a small mouse action.
-3. Screenshot and visual judgment when a target cannot be determined directly.
+2. A cheap text state query such as `get_active_window`, `list_windows`, or bounded `wait_for_window`.
+3. A deterministic keyboard action or short `sequence`.
+4. Screenshot and visual judgment only when the target or result depends on screen meaning.
+
+| Request | First action | Screenshot |
+|---|---|---|
+| Launch an app | `launch_app` | No |
+| Focus an open app | `focus_window`; list only if needed | No |
+| Open a URL | `open_url` | No |
+| Open or find a file | `open_file` / `find_file` | No |
+| Address bar or print dialog | `hotkey CTRL L` / `hotkey CTRL P` | Normally no |
+| Type text or press a key | `type_text` / `press_key` | No |
+| Find a visible button or popup | active-window screenshot | Yes |
+| Interpret a visual result | active-window screenshot | Yes |
+
+For a web search, prefer a known HTTP(S) search URL. This is URL construction, not DOM automation. Use a screenshot only if the user then asks to select or interpret a visible result.
 
 Do not add or use DOM inspection, Playwright, Selenium, OCR, accessibility-tree parsing, image template matching, application-specific automation, an autonomous Python loop, a daemon, a scheduler, a task queue, or arbitrary shell execution.
 
-## Observe, act, verify
+## Verification tiers
 
-For visually guided work:
+Do not treat every state-changing action as requiring a new screenshot.
 
-1. Capture a screenshot and inspect the image at `result.path`.
-2. Confirm the active app, current state, coordinate space, and target.
-3. Perform one action or one deterministic short sequence.
-4. Capture a fresh screenshot after a state-changing action.
-5. Report success only when the requested end state is visible or directly verifiable.
+1. Tier 0: accept a successful tool result for a simple, low-risk deterministic action.
+2. Tier 1: use `get_active_window`, `list_windows`, or `wait_for_window` when OS state is needed.
+3. Tier 2: capture a screenshot only when completion depends on visual meaning, a coordinate click can branch, an error or popup is plausible, or the Fast Path failed.
+
+Do not screenshot before or after a simple app launch, URL open, exact file open, hotkey, key press, or text input unless the user's requested result itself must be visually interpreted. Do not insert screenshots between deterministic address-bar steps; use one `sequence` instead.
+
+## Vision Path
+
+When visual judgment is necessary:
+
+1. Prefer `screenshot --active-window`.
+2. Use a primary-screen screenshot only when the target spans outside the active window.
+3. Use `--all-screens` only when the relevant monitor is unknown.
+4. Inspect the returned image, perform one visual action, and recapture only if its outcome is ambiguous or materially important.
 
 Never make several speculative coordinate clicks from one screenshot. After one reasonable alternate-method retry, stop and report the blocker.
 
@@ -83,15 +106,24 @@ py -3.13 scripts/lcu_tools.py reveal_file "C:\path\document.pdf"
 # Clipboard
 py -3.13 scripts/lcu_tools.py set_clipboard "text"
 py -3.13 scripts/lcu_tools.py get_clipboard
+
+# One process, up to eight deterministic actions
+py -3.13 scripts/lcu_tools.py sequence --json '[{"action":"focus_window","title":"Chrome"},{"action":"hotkey","keys":["CTRL","L"]},{"action":"type_text","text":"OpenAI"},{"action":"press_key","key":"ENTER"}]'
 ```
 
 Positive scroll values move up; negative values move down. `press_key --count` accepts 1 through 100. `wait_for_window` supports `present`, `gone`, and `active`, polls for at most 30 seconds, and is not an agent loop. `close_window` requests a normal close and never force-kills a process.
 
 `type_text` supports Unicode without replacing the clipboard. Use clipboard commands only when explicitly needed and do not repeat clipboard contents unnecessarily. If `find_file` returns several plausible matches, ask the user rather than assuming the newest is correct.
 
+## Deterministic sequence
+
+Use `sequence` only to reduce process starts for a short, predetermined chain. It accepts 1–8 actions from this whitelist: `focus_window`, `hotkey`, `press_key`, `type_text`, and `scroll`.
+
+The complete sequence is validated before the first step. Execution is ordered and fail-fast; there are no conditions, branches, retries, loops, screenshots, clipboard actions, app launches, file actions, or shell commands. On failure, `result.completed` and `result.failedIndex` identify the partial execution. Reassess at the host level instead of retrying automatically.
+
 ## Safety boundary
 
-Allowed without another confirmation when within the user's request:
+Fast Path and `sequence` do not relax safety. Allowed without another confirmation when within the user's request:
 
 - Observe the screen; list, focus, move, resize, minimize, maximize, restore, or normally close a window.
 - Launch a registered app; open a known HTTP(S) site or normal document; search and navigate ordinary menus.

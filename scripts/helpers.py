@@ -163,7 +163,10 @@ class ActionLock(AbstractContextManager["ActionLock"]):
 
 
 def append_action_log(
-    action: str, ok: bool, details: dict[str, Any] | None = None
+    action: str,
+    ok: bool,
+    details: dict[str, Any] | None = None,
+    duration_ms: float | None = None,
 ) -> None:
     try:
         log_dir = runtime_root() / "logs"
@@ -174,6 +177,8 @@ def append_action_log(
             "ok": ok,
             "details": details or {},
         }
+        if duration_ms is not None:
+            record["durationMs"] = max(0.0, duration_ms)
         with (log_dir / "actions.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -240,6 +245,10 @@ def safe_log_details(action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return details
     if action == "screenshot" and arguments.get("region"):
         return {"region": arguments["region"]}
+    if action == "sequence":
+        # The sequence JSON can contain typed text and window titles. Record
+        # only its encoded length; per-step results remain in the CLI response.
+        return {"payload_length": len(str(arguments.get("sequence_json", "")))}
     return {}
 
 

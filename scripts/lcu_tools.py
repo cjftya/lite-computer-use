@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     type_text = subparsers.add_parser("type_text", aliases=["type-text"])
     type_text.add_argument("text")
-    type_text.add_argument("--interval", type=float, default=0.01)
+    type_text.add_argument("--interval", type=float, default=0.0)
 
     press_key = subparsers.add_parser("press_key", aliases=["press-key"])
     press_key.add_argument("key")
@@ -184,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("get_clipboard", aliases=["get-clipboard"])
 
     subparsers.add_parser("list_apps", aliases=["list-apps"])
+
+    sequence = subparsers.add_parser(
+        "sequence", help="Run up to eight safe deterministic actions"
+    )
+    sequence.add_argument("--json", dest="sequence_json", required=True)
     return parser
 
 
@@ -218,6 +223,8 @@ def run_action(args: argparse.Namespace) -> Any:
         return {"apps": registry.names()}
 
     backend = windows_backend()
+    if action == "sequence":
+        return run_sequence(backend, args.sequence_json)
     dispatch: dict[str, Callable[[], Any]] = {
         "screenshot": lambda: _screenshot(backend, args),
         "click": lambda: backend.click(
@@ -269,6 +276,196 @@ def run_action(args: argparse.Namespace) -> Any:
     return callback()
 
 
+SEQUENCE_FIELDS: dict[str, set[str]] = {
+    "focus_window": {"action", "title"},
+    "hotkey": {"action", "keys"},
+    "press_key": {"action", "key", "count"},
+    "type_text": {"action", "text", "interval"},
+    "scroll": {"action", "amount"},
+}
+
+
+def parse_sequence(value: str) -> list[dict[str, Any]]:
+    if len(value) > 100_000:
+        raise LCUError(
+            "sequence_too_large", "Sequence JSON is limited to 100,000 characters"
+        )
+    try:
+        steps = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise LCUError(
+            "invalid_sequence_json",
+            "Sequence must be valid JSON",
+            line=exc.lineno,
+            column=exc.colno,
+        ) from exc
+    if not isinstance(steps, list):
+        raise LCUError("invalid_sequence", "Sequence JSON must be an array")
+    if not 1 <= len(steps) <= 8:
+        raise LCUError(
+            "invalid_sequence_length", "Sequence must contain between 1 and 8 actions"
+        )
+
+    validated: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise LCUError(
+                "invalid_sequence_step",
+                "Each sequence action must be an object",
+                index=index,
+            )
+        raw_action = step.get("action")
+        if not isinstance(raw_action, str):
+            raise LCUError(
+                "invalid_sequence_step",
+                "Each sequence action needs a string action",
+                index=index,
+            )
+        action = normalized_action(raw_action)
+        allowed_fields = SEQUENCE_FIELDS.get(action)
+        if allowed_fields is None:
+            raise LCUError(
+                "sequence_action_not_allowed",
+                f"Action is not allowed in a sequence: {action}",
+                index=index,
+                action=action,
+            )
+        unknown_fields = sorted(set(step) - allowed_fields)
+        if unknown_fields:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence action contains unsupported fields",
+                index=index,
+                fields=unknown_fields,
+            )
+        normalized_step = dict(step)
+        normalized_step["action"] = action
+        _validate_sequence_step(normalized_step, index)
+        validated.append(normalized_step)
+    return validated
+
+
+def _validate_sequence_step(step: dict[str, Any], index: int) -> None:
+    action = step["action"]
+
+    def require_string(name: str) -> None:
+        if not isinstance(step.get(name), str):
+            raise LCUError(
+                "invalid_sequence_step",
+                f"Sequence {action} requires string field: {name}",
+                index=index,
+            )
+
+    if action == "focus_window":
+        require_string("title")
+        if not step["title"].strip():
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence focus_window title cannot be empty",
+                index=index,
+            )
+    elif action == "hotkey":
+        keys = step.get("keys")
+        if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence hotkey requires a string array: keys",
+                index=index,
+            )
+        if not 2 <= len(keys) <= 5:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence hotkey requires between 2 and 5 keys",
+                index=index,
+            )
+    elif action == "press_key":
+        require_string("key")
+        count = step.get("count", 1)
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence press_key count must be an integer",
+                index=index,
+            )
+        if not 1 <= count <= 100:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence press_key count must be between 1 and 100",
+                index=index,
+            )
+    elif action == "type_text":
+        require_string("text")
+        interval = step.get("interval", 0.0)
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence type_text interval must be numeric",
+                index=index,
+            )
+        if not 0 <= interval <= 1:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence type_text interval must be between 0 and 1 second",
+                index=index,
+            )
+        if len(step["text"]) > 10_000:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence type_text is limited to 10,000 characters",
+                index=index,
+            )
+    elif action == "scroll":
+        amount = step.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence scroll amount must be an integer",
+                index=index,
+            )
+        if amount == 0 or abs(amount) > 10_000:
+            raise LCUError(
+                "invalid_sequence_step",
+                "Sequence scroll amount must be between -10000 and 10000, excluding 0",
+                index=index,
+            )
+
+
+def run_sequence(backend: Any, sequence_json: str) -> dict[str, Any]:
+    steps = parse_sequence(sequence_json)
+    results: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        action = step["action"]
+        try:
+            if action == "focus_window":
+                result = backend.focus_window(step["title"])
+            elif action == "hotkey":
+                result = backend.hotkey(step["keys"])
+            elif action == "press_key":
+                result = backend.press_key(step["key"], step.get("count", 1))
+            elif action == "type_text":
+                result = backend.type_text(step["text"], step.get("interval", 0.0))
+            elif action == "scroll":
+                result = backend.scroll(step["amount"])
+            else:  # pragma: no cover - parse_sequence guarantees this set.
+                raise AssertionError(f"Unhandled sequence action: {action}")
+        except LCUError as exc:
+            raise LCUError(
+                "sequence_failed",
+                f"Sequence stopped at action index {index}",
+                completed=len(results),
+                failedIndex=index,
+                failedAction=action,
+                results=results,
+                cause={
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                },
+            ) from exc
+        results.append({"index": index, "action": action, "result": result})
+    return {"completed": len(results), "results": results}
+
+
 def _screenshot(backend: Any, args: argparse.Namespace) -> Any:
     if not 0 <= args.delay <= 30:
         raise LCUError(
@@ -298,30 +495,55 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     action = normalized_action(args.action)
     details = safe_log_details(action, action_arguments(args))
+    started = time.perf_counter()
     try:
         with ActionLock():
             result = run_action(args)
-        append_action_log(action, True, details)
-        emit({"ok": True, "action": action, "result": result})
-        return 0
-    except LCUError as exc:
-        append_action_log(action, False, {**details, "error": exc.code})
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        append_action_log(action, True, details, duration_ms)
         emit(
             {
-                "ok": False,
+                "ok": True,
                 "action": action,
-                "error": {
-                    "code": exc.code,
-                    "message": exc.message,
-                    "details": exc.details,
-                },
+                "result": result,
+                "meta": {"durationMs": duration_ms},
             }
         )
+        return 0
+    except LCUError as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        append_action_log(
+            action, False, {**details, "error": exc.code}, duration_ms
+        )
+        error_details = exc.details
+        payload: dict[str, Any] = {
+            "ok": False,
+            "action": action,
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "details": error_details,
+            },
+            "meta": {"durationMs": duration_ms},
+        }
+        if action == "sequence" and exc.code == "sequence_failed":
+            payload["result"] = {
+                key: exc.details[key]
+                for key in ("completed", "failedIndex", "failedAction", "results")
+            }
+            payload["error"]["details"] = {"cause": exc.details["cause"]}
+        emit(payload)
         if args.debug:
             traceback.print_exc(file=sys.stderr)
         return 2
     except Exception as exc:  # noqa: BLE001 - CLI boundary must always emit JSON.
-        append_action_log(action, False, {**details, "error": "unexpected_error"})
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        append_action_log(
+            action,
+            False,
+            {**details, "error": "unexpected_error"},
+            duration_ms,
+        )
         emit(
             {
                 "ok": False,
@@ -331,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
                     "message": str(exc),
                     "details": {},
                 },
+                "meta": {"durationMs": duration_ms},
             }
         )
         if args.debug:

@@ -27,6 +27,7 @@ class CLITests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertTrue(payload["ok"])
         self.assertIn("chrome", payload["result"]["apps"])
+        self.assertGreaterEqual(payload["meta"]["durationMs"], 0)
 
     @unittest.skipIf(os.name == "nt", "Non-Windows behavior only")
     def test_windows_action_returns_structured_platform_error(self) -> None:
@@ -72,6 +73,18 @@ class CLITests(unittest.TestCase):
             self.assertEqual(2, completed.returncode)
             payload = json.loads(completed.stdout)
             self.assertEqual("unsupported_platform", payload["error"]["code"])
+            self.assertGreaterEqual(payload["meta"]["durationMs"], 0)
+
+    @unittest.skipIf(os.name == "nt", "Non-Windows behavior only")
+    def test_sequence_rejects_disallowed_action_before_backend_use(self) -> None:
+        completed = self.run_cli(
+            "sequence", "--json", '[{"action":"screenshot"}]'
+        )
+        # Platform validation happens before the sequence parser because all
+        # sequence actions are Windows primitives.
+        self.assertEqual(2, completed.returncode)
+        payload = json.loads(completed.stdout)
+        self.assertEqual("unsupported_platform", payload["error"]["code"])
 
 
 if __name__ == "__main__":

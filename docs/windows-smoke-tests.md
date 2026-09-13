@@ -25,6 +25,9 @@ Record each item as pass, fail, or blocked.
 9. Type `OpenAI test` and `한글 입력 테스트` in Notepad.
 10. Run `press_key TAB --count 4`, `press_key ESC`, and `hotkey CTRL L` in suitable apps.
 11. Run `get_mouse_position` and compare the returned coordinate with the visible pointer.
+12. Type at least 500 mixed Korean/ASCII characters with the default zero interval; confirm order and completeness.
+13. Type emoji containing surrogate pairs; confirm no missing or reordered characters.
+14. Repeat the affected input with `--interval 0.01` if an app cannot accept the zero-delay batch.
 
 ## Windows and waiting
 
@@ -72,4 +75,28 @@ After installing the complete skill under `C:\Users\<USER>\.gemini\antigravity\s
 9. "현재 화면의 작은 팝업만 자세히 확인해줘."
 10. "메모장을 닫아줘."
 
-For visually guided scenarios, confirm the host follows Observe → Act → Verify, takes a fresh screenshot after a state change, and stops after one reasonable alternate-method retry rather than repeatedly guessing coordinates. Do not approve a send, submit, purchase, delete, overwrite, install, UAC, or security-warning action during smoke testing.
+## v1.3 Fast Path and token checks
+
+For each request, record CLI invocation count, screenshot count, screenshot scope, retries, `meta.durationMs`, and end-to-end time.
+
+1. "메모장 열어줘": `launch_app`, zero screenshots.
+2. "계산기 열어줘": `launch_app`, zero screenshots.
+3. "네이버 열어줘": `open_url`, zero screenshots.
+4. "열려 있는 Chrome으로 이동해줘": `focus_window`, or `list_windows` then focus; zero screenshots.
+5. "주소창으로 이동해줘": `hotkey CTRL L`, zero screenshots.
+6. "인쇄 화면까지 열어줘": deterministic `hotkey CTRL P`; no screenshot unless the dialog must be visually verified.
+7. "현재 화면의 확인 버튼을 눌러줘": one active-window screenshot before the visual click; recapture only if the result is ambiguous or important.
+8. "현재 팝업이 무슨 내용인지 알려줘": active-window screenshot before primary or all-screen fallback.
+
+Fail the check if the host takes a screenshot before and after every deterministic action, uses a full desktop image while the active window contains the target, or claims visual success without inspecting a needed image.
+
+## v1.3 sequence checks
+
+1. Run address-bar focus → text → Enter as one sequence and confirm ordered results.
+2. Run a sequence with exactly eight allowed steps; confirm success.
+3. Confirm nine steps, malformed JSON, unknown fields, and `screenshot` are rejected before any step runs.
+4. Cause the second step to fail harmlessly; confirm `completed=1`, `failedIndex=1`, and no later action runs.
+5. Confirm typed text and window titles do not appear in `%LOCALAPPDATA%\LiteComputerUse\logs\actions.jsonl`.
+6. Confirm every successful and failed response contains non-negative `meta.durationMs`.
+
+For visually guided scenarios, use a fresh screenshot only when the result is ambiguous, can branch, or materially requires verification. Stop after one reasonable alternate-method retry rather than repeatedly guessing coordinates. Do not approve a send, submit, purchase, delete, overwrite, install, UAC, or security-warning action during smoke testing.

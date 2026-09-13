@@ -149,7 +149,9 @@ class WindowsBackend:
         self.ImageGrab = ImageGrab
 
         self.pyautogui.FAILSAFE = True
-        self.pyautogui.PAUSE = 0.15
+        # A short global pause keeps interactive desktop actions reliable while
+        # avoiding the 150 ms penalty that dominated simple fast-path calls.
+        self.pyautogui.PAUSE = 0.08
 
     @staticmethod
     def _attach_to_default_desktop() -> None:
@@ -464,7 +466,7 @@ class WindowsBackend:
         self.pyautogui.hotkey(*normalized)
         return {"keys": normalized}
 
-    def type_text(self, text: str, interval: float = 0.01) -> dict[str, Any]:
+    def type_text(self, text: str, interval: float = 0.0) -> dict[str, Any]:
         if len(text) > 10_000:
             raise LCUError(
                 "text_too_long", "Text input is limited to 10,000 characters per action"
@@ -491,35 +493,53 @@ class WindowsBackend:
         if not text:
             return
 
-        user32 = ctypes.windll.user32
-        input_keyboard = 1
-        keyeventf_keyup = 0x0002
-        keyeventf_unicode = 0x0004
         utf16 = text.encode("utf-16-le")
         code_units = struct.unpack(f"<{len(utf16) // 2}H", utf16)
+        user32 = ctypes.windll.user32
         user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
         user32.SendInput.restype = wintypes.UINT
-        for code_unit in code_units:
+
+        # With the default zero interval, submit bounded batches instead of one
+        # Windows call per UTF-16 unit. Non-zero intervals retain per-unit pacing.
+        batch_size = 128 if interval == 0 else 1
+        for offset in range(0, len(code_units), batch_size):
             self.pyautogui.failSafeCheck()
-            events = (INPUT * 2)(
-                INPUT(
-                    type=input_keyboard,
-                    ki=KEYBDINPUT(0, code_unit, keyeventf_unicode, 0, 0),
-                ),
-                INPUT(
-                    type=input_keyboard,
-                    ki=KEYBDINPUT(
-                        0, code_unit, keyeventf_unicode | keyeventf_keyup, 0, 0
-                    ),
-                ),
-            )
-            sent = user32.SendInput(2, events, ctypes.sizeof(INPUT))
-            if sent != 2:
+            batch = code_units[offset : offset + batch_size]
+            events = self._unicode_input_events(batch)
+            sent = user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
+            if sent != len(events):
                 raise LCUError(
                     "input_failed", "Windows SendInput did not accept Unicode input"
                 )
             if interval:
                 time.sleep(interval)
+
+    @staticmethod
+    def _unicode_input_events(code_units: tuple[int, ...]) -> Any:
+        input_keyboard = 1
+        keyeventf_keyup = 0x0002
+        keyeventf_unicode = 0x0004
+        values: list[INPUT] = []
+        for code_unit in code_units:
+            values.extend(
+                [
+                    INPUT(
+                        type=input_keyboard,
+                        ki=KEYBDINPUT(0, code_unit, keyeventf_unicode, 0, 0),
+                    ),
+                    INPUT(
+                        type=input_keyboard,
+                        ki=KEYBDINPUT(
+                            0,
+                            code_unit,
+                            keyeventf_unicode | keyeventf_keyup,
+                            0,
+                            0,
+                        ),
+                    ),
+                ]
+            )
+        return (INPUT * len(values))(*values)
 
     def list_windows(self) -> list[dict[str, Any]]:
         active_hwnd = self.win32gui.GetForegroundWindow()

@@ -4,6 +4,19 @@ Lite Computer Use is a lightweight Windows computer-use skill for host agents su
 
 The project deliberately has no DOM integration, Playwright, Selenium, OCR engine, accessibility-tree crawler, app-specific automation framework, autonomous agent loop, scheduler, or background workflow engine.
 
+## What changed in v1.3
+
+v1.3 is a speed and token-efficiency release, not a larger automation system:
+
+- Direct app, window, URL, file, and keyboard actions use a screenshot-free Fast Path.
+- Verification prefers compact OS state before visual input.
+- `sequence` combines up to eight safe deterministic steps into one Python process.
+- Unicode text defaults to zero delay and sends bounded batches of 128 UTF-16 units.
+- PyAutoGUI's global pause is reduced from 150 ms to a conservative 80 ms.
+- Every JSON response and redacted action log includes `durationMs` for measurement.
+
+The main rule is: **screenshot is fallback, not default**. Token savings come from fewer images, smaller visual scope, fewer model/tool turns, and deterministic actions—not from guessing at image compression ratios.
+
 ## Requirements
 
 - Windows 11
@@ -38,7 +51,7 @@ py -3.13 scripts/lcu_tools.py list_apps
 Expected shape:
 
 ```json
-{"ok":true,"action":"list_apps","result":{"apps":["chrome"]}}
+{"ok":true,"action":"list_apps","result":{"apps":["chrome"]},"meta":{"durationMs":1.234}}
 ```
 
 Every invocation prints exactly one JSON object. Expected failures exit with code `2`; unexpected failures exit with code `3`.
@@ -115,6 +128,9 @@ py -3.13 scripts/lcu_tools.py find_file "contract" --limit 10
 py -3.13 scripts/lcu_tools.py open_file "C:\Users\me\Downloads\contract.pdf"
 py -3.13 scripts/lcu_tools.py open_folder "C:\Users\me\Downloads"
 py -3.13 scripts/lcu_tools.py reveal_file "C:\Users\me\Downloads\contract.pdf"
+
+# Bounded deterministic sequence
+py -3.13 scripts/lcu_tools.py sequence --json '[{"action":"focus_window","title":"Chrome"},{"action":"hotkey","keys":["CTRL","L"]},{"action":"type_text","text":"OpenAI"},{"action":"press_key","key":"ENTER"}]'
 ```
 
 `reveal_file` selects a file in Explorer without opening it. `close_window` posts a normal close request; it never force-kills the process, so the application's own unsaved-document dialog remains in control.
@@ -128,17 +144,92 @@ py -3.13 scripts/lcu_tools.py drag 100 100 500 500 --relative-to active-window
 
 Negative screen coordinates are valid on monitors located left of or above the primary monitor. Region screenshots, pointer actions, and window bounds are checked against the full Windows virtual desktop. Move the pointer to the upper-left fail-safe corner to abort a PyAutoGUI mouse or keyboard action.
 
+## Fast Path
+
+Use the cheapest reliable route:
+
+| Request | Preferred primitive | Screenshot |
+|---|---|---|
+| Launch Calculator, Chrome, or Notepad | `launch_app` | No |
+| Focus an open window | `focus_window` | No |
+| Open a known website | `open_url` | No |
+| Find or open a file | `find_file` / `open_file` | No |
+| Focus the address bar or open Print | `hotkey CTRL L` / `hotkey CTRL P` | Normally no |
+| Type text or press Enter/Escape | `type_text` / `press_key` | No |
+| Find a visible button or unknown popup | screenshot | Yes |
+| Interpret a visual result | screenshot | Yes |
+
+For example, “네이버에서 OpenAI 검색해줘” can use a known HTTP(S) search URL directly. If a specific search result must then be selected, switch to the Vision Path for that visual choice. Lite Computer Use never inspects the page DOM.
+
+## Verification policy
+
+- **Tier 0 — tool result:** a successful return is enough for a simple, low-risk deterministic action.
+- **Tier 1 — OS state:** use `get_active_window`, `list_windows`, or `wait_for_window` when state confirmation matters.
+- **Tier 2 — visual:** capture a screenshot when the result depends on screen meaning, a coordinate action may branch, or a popup/error is plausible.
+
+This removes patterns such as screenshot → `Ctrl+L` → screenshot → type → screenshot → Enter → screenshot. The deterministic part should be one sequence, followed by at most one screenshot if the resulting page must be interpreted.
+
+## Vision Path and screenshots
+
+Capture in this order:
+
+1. `screenshot --active-window`
+2. primary-screen `screenshot`
+3. `screenshot --all-screens`
+
+Use the smallest scope that still contains the target. After a visual click, capture again only if the outcome is ambiguous, can branch, or is important to verify.
+
+Active-window image coordinates start at `(0, 0)`. Keep the same window active and pass `--relative-to active-window` to `click`, `double_click`, `move_mouse`, or `drag`. `--region X Y WIDTH HEIGHT` instead uses virtual-desktop screen coordinates and cannot be combined with `--active-window` or `--all-screens`.
+
+## Deterministic sequence
+
+`sequence` reduces model/tool round trips and Python startup overhead for a short chain whose steps are known in advance.
+
+Allowed actions:
+
+- `focus_window`
+- `hotkey`
+- `press_key`
+- `type_text`
+- `scroll`
+
+Rules:
+
+- The JSON value must be an array containing 1–8 action objects.
+- Every step and field is validated before execution begins.
+- Steps run in order and stop on the first LCU error.
+- There are no conditions, branches, loops, retries, screenshots, clipboard actions, app launches, file actions, or arbitrary Python/shell execution.
+- A failure exits with code `2`; `result.completed`, `result.failedIndex`, and ordered prior results describe partial execution.
+
+Example success:
+
+```json
+{"ok":true,"action":"sequence","result":{"completed":2,"results":[{"index":0,"action":"hotkey","result":{"keys":["ctrl","l"]}},{"index":1,"action":"type_text","result":{"length":6,"method":"unicode-sendinput"}}]},"meta":{"durationMs":95.2}}
+```
+
+Do not use a sequence if a later step depends on interpreting the earlier step's screen result. Stop the sequence at that boundary and use the Vision Path.
+
 ## How it works
 
 ```text
 Natural-language request
-→ Host AI reasoning and vision
-→ one Lite Computer Use primitive
+→ direct primitive or compact state query
+→ optional bounded sequence
 → Windows GUI
-→ fresh screenshot or state verification
+→ vision only when meaning or coordinates require it
 ```
 
-The Python layer is not an autonomous agent. The host follows an Observe → Act → Verify loop and uses deterministic actions before resorting to screenshot coordinates. `wait_for_window` is only bounded polling of one window state, with a maximum timeout of 30 seconds.
+The Python layer is not an autonomous agent. `wait_for_window` is only bounded polling of one window state, with a maximum timeout of 30 seconds. It does not reason, retry a goal, or continue in the background.
+
+## Text input optimization
+
+`type_text` uses Windows Unicode `SendInput`, so Korean and other Unicode text do not require replacing the clipboard. The default interval is `0`; zero-delay text is sent in bounded batches of 128 UTF-16 units. Emoji surrogate pairs preserve their original UTF-16 order. Newlines and tabs remain explicit Enter and Tab key events.
+
+Use `--interval` only for an application that demonstrably drops fast input:
+
+```powershell
+py -3.13 scripts/lcu_tools.py type_text "한글 입력 테스트" --interval 0.01
+```
 
 ## App configuration
 
@@ -153,6 +244,26 @@ apps:
 
 The launcher checks `PATH`, Windows App Paths, and Windows application aliases. It returns an error rather than guessing through the Start menu.
 
+## Files and folders
+
+`find_file` searches the current user's Desktop, Downloads, and Documents folders, including available OneDrive Desktop and Documents locations. It performs a case-insensitive partial filename match, sorts by modification time, and limits results to 1–100. The host must ask when several returned files remain plausible; newest does not mean correct.
+
+`open_file` opens an exact existing normal document through its Windows file association. It rejects executables, installers, scripts, shortcuts, registry files, disk images, and other launch-capable extensions. `open_folder` validates and opens a directory. `reveal_file` opens Explorer with an existing file selected without launching that file. There are no delete, rename, move, copy, create, or overwrite primitives.
+
+## Browser use
+
+`open_url` accepts only absolute `http://` or `https://` URLs and sends them to the default browser. Prefer direct known URLs and encoded search URLs because they need no image or DOM inspection. Use `hotkey CTRL L` plus deterministic text input when working in an already open browser. Use a screenshot only when the next step depends on visible page content.
+
+Lite Computer Use does not inspect DOM nodes, control developer tools, install a browser extension, bypass site security, or infer that a loaded URL means the page's visual task succeeded.
+
+## Runtime logs and screenshots
+
+Screenshots are stored under `%TEMP%\LiteComputerUse\screenshots` and files older than 24 hours are cleaned when a new screenshot is taken.
+
+Redacted action logs are stored at `%LOCALAPPDATA%\LiteComputerUse\logs\actions.jsonl`. Each entry records UTC time, action name, success, minimal redacted metadata, and non-negative `durationMs`. Typed text, clipboard text, complete paths, complete URLs, complete window titles, and screenshot pixels are never logged. Sequence logs store only the JSON payload length.
+
+`durationMs` measures local execution after CLI argument parsing and includes action-lock acquisition. It is not the model's end-to-end latency and does not estimate host or vision tokens.
+
 ## Safety
 
 Within the user's request, the host may capture the screen, inspect or focus windows, launch registered apps, open normal documents or known websites, search, navigate menus, scroll, move or resize windows, perform harmless drags, open folders, and reveal files.
@@ -161,7 +272,9 @@ The host must ask immediately before a final action that sends or submits data; 
 
 Password or recovery-code entry, MFA entry, UAC approval, CAPTCHA bypass, security-warning bypass, secret extraction, arbitrary shell execution, process termination, and registry modification are prohibited.
 
-Runtime screenshots are written to `%TEMP%\LiteComputerUse\screenshots` and cleaned after 24 hours. Redacted logs are written to `%LOCALAPPDATA%\LiteComputerUse\logs\actions.jsonl`. Typed text, clipboard text, complete paths, complete URLs, and complete window titles are not logged.
+## Emergency stop
+
+PyAutoGUI's fail-safe remains enabled. Move the pointer to the upper-left corner of the desktop to abort a PyAutoGUI-driven mouse or keyboard action. Atomic `drag` still attempts `mouseUp` during failure cleanup so the button is not left logically held down.
 
 ## Troubleshooting
 
@@ -183,6 +296,34 @@ Install dependencies into the same Python 3.13 runtime used for commands:
 ```powershell
 py -3.13 -m pip install -r requirements.txt
 ```
+
+### `app_not_registered`
+
+Use `list_apps`, then add a trusted alias and launch command to `config/apps.yaml`. There is intentionally no arbitrary executable or shell-command argument.
+
+### `window_not_found` or `ambiguous_window`
+
+Run `list_windows`. For a missing window, launch it first; for an ambiguous result, use a longer unique title. The resolver never chooses randomly.
+
+### `coordinate_out_of_bounds`
+
+Refresh the relevant bounds with `get_active_window` or `list_windows`. If coordinates came from a cropped screenshot, pass `--relative-to active-window`. Negative coordinates are valid on monitors left of or above the primary display.
+
+### `clipboard_busy`
+
+Another application currently owns the clipboard. Wait briefly and retry once. Prefer `type_text` when clipboard transfer is not required.
+
+### Window focus fails
+
+Confirm the window is visible in the current interactive desktop session. Services, locked sessions, UAC desktops, and headless execution are unsupported.
+
+### Korean or emoji input is incomplete
+
+Confirm Python 3.11+ and current dependencies, then retry the affected app with `--interval 0.01`. Record the app name and result in the Windows smoke test because some applications process Unicode input differently.
+
+### Multi-monitor coordinates do not match
+
+Confirm Windows display arrangement and scaling, then compare `list_windows` bounds with `screenshot --all-screens`. Do not assume the primary monitor begins at the virtual desktop's top-left corner.
 
 ### Antigravity cannot find the skill
 
@@ -206,3 +347,7 @@ py -3.13 -m compileall scripts tests
 ```
 
 Real mouse, keyboard, screenshot, Explorer, and window behavior must also be checked on an interactive Windows desktop. Follow [`docs/windows-smoke-tests.md`](docs/windows-smoke-tests.md).
+
+## Performance benchmark
+
+Use the repeatable B1–B8 procedure and record template in [`docs/performance.md`](docs/performance.md). Compare success rate first, then screenshot count, vision use, CLI invocations, retries, `meta.durationMs`, and end-to-end time. Do not accept a faster result that lowers reliability or weakens the safety boundary.
