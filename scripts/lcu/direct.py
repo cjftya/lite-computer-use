@@ -97,9 +97,10 @@ def open_file(path_str: str) -> dict[str, Any]:
     if not path_str or not path_str.strip():
         raise LCUError("invalid_arguments", "Path cannot be empty")
 
-    path = Path(path_str).resolve()
+    path = Path(path_str)
     if not path.is_absolute():
         raise LCUError("invalid_arguments", f"Path must be absolute: {path_str}")
+    path = path.resolve()
 
     if not path.exists():
         raise LCUError("not_found", f"File not found: {path_str}")
@@ -167,9 +168,10 @@ def reveal_file(path_str: str) -> dict[str, Any]:
     if not path_str or not path_str.strip():
         raise LCUError("invalid_arguments", "Path cannot be empty")
 
-    path = Path(path_str).resolve()
+    path = Path(path_str)
     if not path.is_absolute():
         raise LCUError("invalid_arguments", f"Path must be absolute: {path_str}")
+    path = path.resolve()
 
     if not path.exists():
         raise LCUError("not_found", f"File not found: {path_str}")

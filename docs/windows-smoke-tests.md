@@ -54,3 +54,14 @@ py -3.13 tests\run_smoke_tests.py
 | `hotkey` | `py -3.13 scripts\lcu.py hotkey CTRL V` | Pastes clipboard text into Notepad |
 | `close_window` | `py -3.13 scripts\lcu.py close_window "notepad"` | Closes Notepad (prompts save dialog if modified) |
 | `batch` | `py -3.13 scripts\lcu.py batch '[{"action": "set_clipboard", "text": "Batch"}, {"action": "open_file", "path": "bad"}]'` | Fails fast at step 2, step 1 completed |
+
+---
+
+## 3. Key Hardening Contracts Verified
+
+- **Batch Pre-validation**: All action schemas are validated upfront before execution. An invalid action anywhere in the list causes the entire batch to fail immediately with zero side effects.
+- **Path Resolution**: `open_file` and `reveal_file` strictly reject relative paths with `invalid_arguments`.
+- **Pixel Boundaries**: Image pixel coordinates in `resolve_capture_coordinates` require `0 <= x < width` and `0 <= y < height`. Boundary values `x == width` or `y == height` are rejected with `coordinate_out_of_bounds`.
+- **Screen Region Coordinates**: `screenshot --target screen --region x y w h` always computes coordinates relative to virtual desktop `(0, 0)` regardless of multi-monitor origin offsets.
+- **Cache Boundedness**: Retains at most 50 captures within 24 hours in `%TEMP%\LiteComputerUse\`; older records and image files are purged automatically.
+- **Window Screenshot Limitation**: `screenshot --target window` captures visible screen pixels within window bounds. Use `focus_window` first if window might be obscured.

@@ -32,6 +32,12 @@ def test_open_file_validation(tmp_path: Path) -> None:
         open_file(str(non_existent))
     assert exc_info.value.code == "not_found"
 
+    # Relative path
+    with pytest.raises(LCUError) as exc_info:
+        open_file("relative_file.txt")
+    assert exc_info.value.code == "invalid_arguments"
+    assert "Path must be absolute" in exc_info.value.message
+
     # Blocked extension
     exe_file = tmp_path / "malicious.exe"
     exe_file.write_text("test")
@@ -87,6 +93,12 @@ def test_open_url() -> None:
 
 
 def test_reveal_file(tmp_path: Path) -> None:
+    # Relative path
+    with pytest.raises(LCUError) as exc_info:
+        reveal_file("relative_file.txt")
+    assert exc_info.value.code == "invalid_arguments"
+    assert "Path must be absolute" in exc_info.value.message
+
     target = tmp_path / "myfile.dat"
     target.write_text("data")
 

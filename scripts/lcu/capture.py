@@ -87,6 +87,39 @@ class CaptureMetadata:
         return cls(**d)
 
 
+MAX_CAPTURES_IN_CACHE = 50
+CAPTURE_MAX_AGE_SECONDS = 86_400  # 24 hours
+
+
+def _prune_capture_cache(index: dict[str, CaptureMetadata]) -> dict[str, CaptureMetadata]:
+    now = time.time()
+    valid_items: list[tuple[str, CaptureMetadata]] = []
+    to_delete: list[CaptureMetadata] = []
+
+    for cid, meta in index.items():
+        if now - meta.timestamp > CAPTURE_MAX_AGE_SECONDS:
+            to_delete.append(meta)
+        else:
+            valid_items.append((cid, meta))
+
+    # Keep only newest MAX_CAPTURES_IN_CACHE
+    if len(valid_items) > MAX_CAPTURES_IN_CACHE:
+        valid_items.sort(key=lambda x: x[1].timestamp, reverse=True)
+        for _, old_meta in valid_items[MAX_CAPTURES_IN_CACHE:]:
+            to_delete.append(old_meta)
+        valid_items = valid_items[:MAX_CAPTURES_IN_CACHE]
+
+    for old_meta in to_delete:
+        try:
+            p = Path(old_meta.path)
+            if p.is_file():
+                p.unlink()
+        except Exception:
+            pass
+
+    return dict(valid_items)
+
+
 def _load_capture_index() -> dict[str, CaptureMetadata]:
     path = get_capture_index_path()
     if not path.is_file():
@@ -100,6 +133,10 @@ def _load_capture_index() -> dict[str, CaptureMetadata]:
 
 
 def _save_capture_index(index: dict[str, CaptureMetadata]) -> None:
+    try:
+        index = _prune_capture_cache(index)
+    except Exception:
+        pass
     path = get_capture_index_path()
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -154,11 +191,11 @@ def resolve_capture_coordinates(capture_id: str, image_x: int, image_y: int) -> 
                     f"Window moved or resized since capture: current {curr_bounds} != captured {meta.window_bounds}",
                 )
 
-    # Check bounds in image
-    if not (0 <= image_x <= meta.returned_width and 0 <= image_y <= meta.returned_height):
+    # Check bounds in image (0 <= x < width and 0 <= y < height)
+    if not (0 <= image_x < meta.returned_width and 0 <= image_y < meta.returned_height):
         raise LCUError(
             "coordinate_out_of_bounds",
-            f"Coordinate ({image_x}, {image_y}) is outside capture image bounds (0..{meta.returned_width}, 0..{meta.returned_height})",
+            f"Coordinate ({image_x}, {image_y}) is outside capture image bounds (0..{meta.returned_width - 1}, 0..{meta.returned_height - 1})",
         )
 
     # Inverse scale mapping
@@ -259,8 +296,13 @@ def capture_screenshot(
                 rx, ry, rw, rh = region
                 if rw <= 0 or rh <= 0:
                     raise LCUError("invalid_arguments", f"Region width and height must be positive: ({rw}, {rh})")
-                source_x = rx
-                source_y = ry
+                if not (0 <= rx < screen_w and 0 <= ry < screen_h and rx + rw <= screen_w and ry + rh <= screen_h):
+                    raise LCUError(
+                        "coordinate_out_of_bounds",
+                        f"Region ({rx}, {ry}, {rw}, {rh}) is outside screen bounds ({screen_w}x{screen_h})",
+                    )
+                source_x = screen_x + rx
+                source_y = screen_y + ry
                 source_w = rw
                 source_h = rh
                 crop_bounds = {"x": rx, "y": ry, "width": rw, "height": rh}
@@ -301,6 +343,11 @@ def capture_screenshot(
                 rx, ry, rw, rh = region
                 if rw <= 0 or rh <= 0:
                     raise LCUError("invalid_arguments", f"Region width and height must be positive: ({rw}, {rh})")
+                if not (0 <= rx < win_w and 0 <= ry < win_h and rx + rw <= win_w and ry + rh <= win_h):
+                    raise LCUError(
+                        "coordinate_out_of_bounds",
+                        f"Region ({rx}, {ry}, {rw}, {rh}) is outside window bounds ({win_w}x{win_h})",
+                    )
                 # Region is relative to the target window
                 source_x = win_l + rx
                 source_y = win_t + ry

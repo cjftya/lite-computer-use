@@ -94,10 +94,11 @@ AI는 마우스/비전보다 Direct Tool을 항상 최우선으로 선택해야 
    ```
    Python이 자동으로 해상도 역스케일링, DPI, 윈도우 오프셋을 계산하여 정확한 물리 모니터 좌표를 클릭합니다.
 
-3. **품질 프리셋**:
+3. **품질 프리셋 & 캐시 관리**:
    - `fast`: 최대 1024px, WebP Q70 (전체 화면 파악, 대략적 확인)
    - `normal` (기본값): 최대 1600px, WebP Q82 (일반 UI 조작)
    - `detail`: 1.0x 원본 무손실 (작은 폰트, 정밀 UI)
+   - **캐시 관리**: 최근 50개 캡처 및 24시간 이내 데이터만 자동 유지되며, 이전 파일과 메타데이터는 자동 정리됩니다.
 
 ---
 
@@ -107,11 +108,15 @@ AI는 마우스/비전보다 Direct Tool을 항상 최우선으로 선택해야 
   ```powershell
   py -3.13 scripts\lcu.py screenshot --target active-window --region 100 80 400 300
   ```
+- **전체 화면 기준 부분 캡처**:
+  `screenshot --target screen --region x y w h`의 좌표계는 멀티모니터 가상 데스크톱 전체 캡처 이미지 좌상단을 항상 `(0, 0)`으로 계산합니다.
 - **기존 캡처 이미지 내 부분 재캡처 (`from-capture`)**:
   이전 캡처의 특정 영역을 원본 해상도로 확대 관찰할 때 사용:
   ```powershell
   py -3.13 scripts\lcu.py screenshot --from-capture c_8f2a91 --region 200 150 100 80 --quality detail
   ```
+- **Window 캡처 주의점**:
+  `screenshot --target window`는 화면에 표시된 윈도우 영역 픽셀을 캡처하므로 다른 창에 가려져 있으면 겹친 내용이 들어갈 수 있습니다. 정밀 조작 시 `focus_window` 후 캡처를 권장합니다.
 
 ---
 
@@ -123,9 +128,10 @@ AI는 마우스/비전보다 Direct Tool을 항상 최우선으로 선택해야 
 py -3.13 scripts\lcu.py batch '[{"action": "click", "x": 300, "y": 150, "capture": "c_8f2a91", "delay_after": 0.2}, {"action": "type_text", "text": "검색어"}, {"action": "press_key", "key": "ENTER"}]'
 ```
 
+- **사전 검증 보증**: 실행 전 모든 action의 스키마를 100% 사전 검증하며, 뒤쪽 action이라도 유효하지 않으면 첫 action조차 실행되지 않습니다 (Zero side effects).
 - 각 action에 `delay_after` (0.0~5.0초) 지정 가능.
 - 최대 12개 action 제한.
-- 관찰 도구(`screenshot`, `list_windows`, `find_path`)는 batch 내 포함 불가 (사전 validation 실패).
+- 관찰 도구(`screenshot`, `list_windows`, `find_path`)는 batch 내 포함 불가.
 - 첫 실패 시 즉시 중단(fail-fast), 자동 retry 없음.
 
 ---

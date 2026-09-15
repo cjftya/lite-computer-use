@@ -136,6 +136,10 @@ Output:
 }
 ```
 
+- **Screen region coordinates**: `screenshot --target screen --region x y w h` always treats the top-left of the multi-monitor virtual desktop image as `(0, 0)`.
+- **Window capture note**: `screenshot --target window` captures visible screen pixels within the window bounds; use `focus_window` first if other windows might overlap.
+- **Cache policy**: Retains up to 50 most recent captures within 24 hours in `%TEMP%\LiteComputerUse\`; older captures and image files are pruned automatically.
+
 ### 4. Mouse & Keyboard
 AI clicks the exact coordinates seen in the image; Python translates scale, region crop offset, and window offset:
 ```powershell
@@ -166,7 +170,10 @@ py -3.13 scripts\lcu.py get_clipboard
 ```
 
 ### 5. Batch Execution
-Execute deterministic multi-action sequences with fail-fast guarantee:
+Execute deterministic multi-action sequences with full upfront validation and fail-fast guarantee:
+- **Upfront validation**: The entire action schema is validated before execution. If any action is invalid, zero actions are executed (0 side effects).
+- **Fail-fast**: Stops execution immediately at the first runtime error without retry.
+
 ```powershell
 py -3.13 scripts\lcu.py batch '[
   {"action": "click", "x": 620, "y": 350, "capture": "c_8f2a91", "delay_after": 0.2},
