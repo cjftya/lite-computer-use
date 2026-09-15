@@ -13,6 +13,7 @@ from scripts.lcu.apps import (
     APP_INDEX_CACHE_VERSION,
     AppEntry,
     _is_packaged_app_command,
+    _wait_for_visible_app_window,
     build_app_index,
     find_app_entry,
     open_app,
@@ -193,20 +194,65 @@ def test_open_app_mocked() -> None:
         assert exc_info.value.code == "not_found"
 
 
-def test_open_app_packaged_fallback_on_missing_window() -> None:
+def test_open_app_primary_window_appears_before_timeout() -> None:
     app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
     entry = AppEntry(
         "Notepad",
         "notepad.exe",
         "config",
-        ["notepad", "메모장"],
+        ["notepad"],
         "notepad",
         commands=["notepad.exe", app_x_cmd],
     )
+    poll_round = 0
+
+    def mock_list_wins(query: str | None = None):
+        nonlocal poll_round
+        if query == "Notepad":
+            poll_round += 1
+        if poll_round >= 3:
+            return [{"title": "Notepad"}]
+        return []
+
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("os.startfile") as mock_start, \
-         patch("scripts.lcu.windows.list_windows", return_value=[]), \
+         patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins) as mock_list, \
+         patch("time.sleep") as mock_sleep:
+        res = open_app("notepad")
+        assert res["app"] == "Notepad"
+        assert res["target"] == "notepad.exe"
+        mock_start.assert_called_once_with("notepad.exe")
+        # Early exit: sleep called 2 times before 3rd check succeeds
+        assert mock_sleep.call_count == 2
+
+
+def test_open_app_primary_timeout_then_appx_success() -> None:
+    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        "Notepad",
+        "notepad.exe",
+        "config",
+        ["notepad"],
+        "notepad",
+        commands=["notepad.exe", app_x_cmd],
+    )
+    poll_round = 0
+
+    def mock_list_wins(query: str | None = None):
+        nonlocal poll_round
+        if query == "Notepad":
+            poll_round += 1
+        # Primary timeout takes 16 checks (timeout 1.5 / interval 0.1 + 1).
+        # On 17th round (first fallback check), window is found.
+        if poll_round > 16:
+            return [{"title": "Notepad"}]
+        return []
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins), \
          patch("time.sleep"):
         res = open_app("notepad")
         assert res["app"] == "Notepad"
@@ -216,26 +262,7 @@ def test_open_app_packaged_fallback_on_missing_window() -> None:
         mock_start.assert_any_call(app_x_cmd)
 
 
-def test_open_app_packaged_fallback_on_dispatch_error() -> None:
-    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
-    entry = AppEntry(
-        "Calculator",
-        "calc.exe",
-        "config",
-        ["calculator", "계산기"],
-        "calculator",
-        commands=["calc.exe", app_x_cmd],
-    )
-    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
-         patch("os.startfile", side_effect=[OSError("Failed to start calc.exe"), None]) as mock_start:
-        res = open_app("calculator")
-        assert res["app"] == "Calculator"
-        assert res["target"] == app_x_cmd
-        assert mock_start.call_count == 2
-
-
-def test_open_app_packaged_fallback_failure_raises_dispatch_failed() -> None:
+def test_open_app_primary_timeout_appx_dispatch_error() -> None:
     app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
     entry = AppEntry(
         "Notepad",
@@ -254,6 +281,68 @@ def test_open_app_packaged_fallback_failure_raises_dispatch_failed() -> None:
             open_app("notepad")
         assert exc_info.value.code == "dispatch_failed"
         assert mock_start.call_count == 2
+
+
+def test_open_app_primary_timeout_appx_no_window() -> None:
+    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        "Notepad",
+        "notepad.exe",
+        "config",
+        ["notepad", "메모장"],
+        "notepad",
+        commands=["notepad.exe", app_x_cmd],
+    )
+    # Both primary and fallback produce no window
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", return_value=[]), \
+         patch("time.sleep"):
+        with pytest.raises(LCUError) as exc_info:
+            open_app("notepad")
+        assert exc_info.value.code == "dispatch_failed"
+        assert mock_start.call_count == 2
+
+
+def test_open_app_packaged_fallback_on_dispatch_error() -> None:
+    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        "Calculator",
+        "calc.exe",
+        "config",
+        ["calculator", "계산기"],
+        "calculator",
+        commands=["calc.exe", app_x_cmd],
+    )
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile", side_effect=[OSError("Failed to start calc.exe"), None]) as mock_start, \
+         patch("scripts.lcu.windows.list_windows", return_value=[{"title": "Calculator"}]), \
+         patch("time.sleep"):
+        res = open_app("calculator")
+        assert res["app"] == "Calculator"
+        assert res["target"] == app_x_cmd
+        assert mock_start.call_count == 2
+
+
+def test_wait_for_visible_app_window_early_exit() -> None:
+    entry = AppEntry("TestApp", "test.exe", "config", [], "testapp")
+    # Immediate find on check 1
+    with patch("os.name", "nt"), \
+         patch("scripts.lcu.windows.list_windows", return_value=[{"title": "TestApp"}]), \
+         patch("time.sleep") as mock_sleep:
+        found = _wait_for_visible_app_window(entry, timeout=1.2, interval=0.1)
+        assert found is True
+        mock_sleep.assert_not_called()
+
+    # Find on check 2
+    with patch("os.name", "nt"), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [{"title": "TestApp"}]]), \
+         patch("time.sleep") as mock_sleep:
+        found = _wait_for_visible_app_window(entry, timeout=1.2, interval=0.1)
+        assert found is True
+        assert mock_sleep.call_count == 1
 
 
 def test_open_app_general_multi_command_no_window_verification() -> None:

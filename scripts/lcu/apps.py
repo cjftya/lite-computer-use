@@ -16,10 +16,49 @@ from .errors import LCUError
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
 APP_INDEX_CACHE_VERSION = 2
+APP_WINDOW_READY_TIMEOUT = 1.5
+APP_WINDOW_READY_INTERVAL = 0.1
 
 
 def _is_packaged_app_command(command: str) -> bool:
     return command.strip().lower().startswith("shell:appsfolder\\")
+
+
+def _wait_for_visible_app_window(
+    entry: AppEntry,
+    timeout: float = APP_WINDOW_READY_TIMEOUT,
+    interval: float = APP_WINDOW_READY_INTERVAL,
+) -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        from .windows import list_windows
+    except ImportError:
+        return True
+
+    t_end = time.time() + timeout
+    max_checks = max(1, int(round(timeout / interval)) + 1) if interval > 0 else 1
+    checks = 0
+
+    while checks < max_checks:
+        try:
+            wins = list_windows(query=entry.name)
+            if not wins:
+                for alias in entry.aliases:
+                    wins = list_windows(query=alias)
+                    if wins:
+                        break
+            if wins:
+                return True
+        except Exception:
+            pass
+
+        checks += 1
+        if time.time() >= t_end or checks >= max_checks:
+            break
+        if interval > 0:
+            time.sleep(interval)
+    return False
 
 
 def normalize_app_name(name: str) -> str:
@@ -308,31 +347,16 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
             last_exc = exc
             continue
 
-        # Verify visible UI window only if a packaged app fallback candidate exists after this command
-        needs_verification = (
-            os.name == "nt"
-            and not _is_packaged_app_command(target)
-            and any(_is_packaged_app_command(c) for c in commands_to_try[idx + 1:])
-        )
+        is_packaged = _is_packaged_app_command(target)
+        has_subsequent_packaged = any(_is_packaged_app_command(c) for c in commands_to_try[idx + 1:])
 
-        if needs_verification:
-            time.sleep(0.25)
-            wins = []
-            try:
-                from .windows import list_windows
-
-                wins = list_windows(query=entry.name)
-                if not wins:
-                    for alias in entry.aliases:
-                        wins = list_windows(query=alias)
-                        if wins:
-                            break
-            except Exception:
-                wins = []
-
-            if not wins:
-                # Primary executable dispatched but no visible UI window found; try packaged AppX candidate
-                last_exc = RuntimeError(f"No visible window found for '{target}'")
+        # Verify visible UI window if a packaged app fallback candidate follows, or for the packaged fallback itself
+        if os.name == "nt" and (has_subsequent_packaged or (is_packaged and idx > 0)):
+            if _wait_for_visible_app_window(entry):
+                successful_target = target
+                break
+            else:
+                last_exc = RuntimeError(f"No visible window found for '{target}' within timeout")
                 continue
 
         successful_target = target
