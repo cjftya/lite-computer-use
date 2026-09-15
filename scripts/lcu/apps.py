@@ -15,6 +15,11 @@ import yaml
 from .errors import LCUError
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
+APP_INDEX_CACHE_VERSION = 2
+
+
+def _is_packaged_app_command(command: str) -> bool:
+    return command.strip().lower().startswith("shell:appsfolder\\")
 
 
 def normalize_app_name(name: str) -> str:
@@ -185,8 +190,9 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
                 cached_data = json.load(f)
+            cached_version = cached_data.get("version")
             cached_time = cached_data.get("timestamp", 0)
-            if now - cached_time < CACHE_MAX_AGE_SECONDS:
+            if cached_version == APP_INDEX_CACHE_VERSION and (now - cached_time < CACHE_MAX_AGE_SECONDS):
                 items = cached_data.get("apps", [])
                 return [AppEntry.from_dict(item) for item in items]
         except Exception:
@@ -211,6 +217,7 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
+                    "version": APP_INDEX_CACHE_VERSION,
                     "timestamp": now,
                     "apps": [app.to_dict() for app in result],
                 },
@@ -288,8 +295,8 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
         raise LCUError("not_found", f"No application found matching '{name}'")
 
     commands_to_try = getattr(entry, "commands", None) or [entry.target]
-    last_exc = None
-    executed_target = None
+    last_exc: Exception | None = None
+    successful_target: str | None = None
 
     for idx, target in enumerate(commands_to_try):
         try:
@@ -297,32 +304,44 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                 os.startfile(target)
             else:
                 subprocess.Popen(target, shell=True)
-            executed_target = target
-
-            # If there is a packaged app fallback candidate, verify UI window creation on Windows
-            if idx == 0 and len(commands_to_try) > 1 and os.name == "nt":
-                time.sleep(0.25)
-                try:
-                    from .windows import list_windows
-
-                    wins = list_windows(query=entry.name)
-                    if not wins:
-                        for alias in entry.aliases:
-                            wins = list_windows(query=alias)
-                            if wins:
-                                break
-                    if not wins:
-                        # Primary executable dispatched but no visible UI window found; try packaged AppX candidate
-                        continue
-                except Exception:
-                    pass
-
-            break
         except Exception as exc:
             last_exc = exc
             continue
 
-    if executed_target is None:
-        raise LCUError("dispatch_failed", f"Failed to launch application '{name}' ({entry.target}): {last_exc}") from last_exc
+        # Verify visible UI window only if a packaged app fallback candidate exists after this command
+        needs_verification = (
+            os.name == "nt"
+            and not _is_packaged_app_command(target)
+            and any(_is_packaged_app_command(c) for c in commands_to_try[idx + 1:])
+        )
 
-    return {"app": entry.name, "target": executed_target}
+        if needs_verification:
+            time.sleep(0.25)
+            wins = []
+            try:
+                from .windows import list_windows
+
+                wins = list_windows(query=entry.name)
+                if not wins:
+                    for alias in entry.aliases:
+                        wins = list_windows(query=alias)
+                        if wins:
+                            break
+            except Exception:
+                wins = []
+
+            if not wins:
+                # Primary executable dispatched but no visible UI window found; try packaged AppX candidate
+                last_exc = RuntimeError(f"No visible window found for '{target}'")
+                continue
+
+        successful_target = target
+        break
+
+    if successful_target is None:
+        raise LCUError(
+            "dispatch_failed",
+            f"Failed to launch application '{name}' ({entry.target}): {last_exc}",
+        ) from last_exc
+
+    return {"app": entry.name, "target": successful_target}

@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.lcu.apps import AppEntry, find_app_entry, open_app
+from scripts.lcu.apps import (
+    APP_INDEX_CACHE_VERSION,
+    AppEntry,
+    _is_packaged_app_command,
+    build_app_index,
+    find_app_entry,
+    open_app,
+)
 from scripts.lcu.direct import (
     find_path,
     get_known_folder,
@@ -224,3 +233,132 @@ def test_open_app_packaged_fallback_on_dispatch_error() -> None:
         assert res["app"] == "Calculator"
         assert res["target"] == app_x_cmd
         assert mock_start.call_count == 2
+
+
+def test_open_app_packaged_fallback_failure_raises_dispatch_failed() -> None:
+    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        "Notepad",
+        "notepad.exe",
+        "config",
+        ["notepad", "메모장"],
+        "notepad",
+        commands=["notepad.exe", app_x_cmd],
+    )
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile", side_effect=[None, OSError("AppX package failed to launch")]) as mock_start, \
+         patch("scripts.lcu.windows.list_windows", return_value=[]), \
+         patch("time.sleep"):
+        with pytest.raises(LCUError) as exc_info:
+            open_app("notepad")
+        assert exc_info.value.code == "dispatch_failed"
+        assert mock_start.call_count == 2
+
+
+def test_open_app_general_multi_command_no_window_verification() -> None:
+    entry = AppEntry(
+        "Outlook",
+        "outlook.exe",
+        "config",
+        ["outlook", "아웃룩"],
+        "outlook",
+        commands=["outlook.exe", "olk.exe"],
+    )
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows") as mock_list, \
+         patch("time.sleep") as mock_sleep:
+        res = open_app("outlook")
+        assert res["app"] == "Outlook"
+        assert res["target"] == "outlook.exe"
+        mock_start.assert_called_once_with("outlook.exe")
+        mock_list.assert_not_called()
+        mock_sleep.assert_not_called()
+
+
+def test_open_app_general_multi_command_fallback_on_error() -> None:
+    entry = AppEntry(
+        "Teams",
+        "ms-teams.exe",
+        "config",
+        ["teams", "팀즈"],
+        "teams",
+        commands=["ms-teams.exe", "msteams:"],
+    )
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile", side_effect=[OSError("Executable not found"), None]) as mock_start, \
+         patch("scripts.lcu.windows.list_windows") as mock_list, \
+         patch("time.sleep") as mock_sleep:
+        res = open_app("teams")
+        assert res["app"] == "Teams"
+        assert res["target"] == "msteams:"
+        assert mock_start.call_count == 2
+        mock_start.assert_any_call("ms-teams.exe")
+        mock_start.assert_any_call("msteams:")
+        mock_list.assert_not_called()
+        mock_sleep.assert_not_called()
+
+
+def test_is_packaged_app_command() -> None:
+    assert _is_packaged_app_command(r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App") is True
+    assert _is_packaged_app_command(r"shell:appsfolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel") is True
+    assert _is_packaged_app_command("notepad.exe") is False
+    assert _is_packaged_app_command("outlook.exe") is False
+    assert _is_packaged_app_command("msteams:") is False
+    assert _is_packaged_app_command("ms-settings:") is False
+
+
+def test_build_app_index_cache_version_invalidation(tmp_path: Path) -> None:
+    cache_file = tmp_path / "app-index.json"
+    entry_dict = {
+        "name": "CachedApp",
+        "target": "cached.exe",
+        "source": "config",
+        "aliases": ["cached"],
+        "normalized": "cachedapp",
+        "commands": ["cached.exe"],
+    }
+
+    with patch("scripts.lcu.apps.get_cache_file_path", return_value=cache_file), \
+         patch("scripts.lcu.apps.load_config_apps", return_value=[AppEntry.from_dict(entry_dict)]) as mock_load, \
+         patch("scripts.lcu.apps.discover_start_menu_apps", return_value=[]), \
+         patch("scripts.lcu.apps.discover_app_paths_apps", return_value=[]):
+
+        # 1. Fresh cache with matching version
+        cache_file.write_text(
+            json.dumps({"version": APP_INDEX_CACHE_VERSION, "timestamp": time.time(), "apps": [entry_dict]}),
+            encoding="utf-8",
+        )
+        res = build_app_index()
+        assert len(res) == 1
+        assert res[0].name == "CachedApp"
+        mock_load.assert_not_called()
+
+        # 2. Missing version key (legacy cache) -> triggers rebuild
+        cache_file.write_text(
+            json.dumps({"timestamp": time.time(), "apps": [entry_dict]}),
+            encoding="utf-8",
+        )
+        res = build_app_index()
+        assert len(res) == 1
+        mock_load.assert_called_once()
+        mock_load.reset_mock()
+
+        # 3. Old version (version = 1) -> triggers rebuild
+        cache_file.write_text(
+            json.dumps({"version": 1, "timestamp": time.time(), "apps": [entry_dict]}),
+            encoding="utf-8",
+        )
+        res = build_app_index()
+        assert len(res) == 1
+        mock_load.assert_called_once()
+        mock_load.reset_mock()
+
+        # 4. Verified newly written cache has version = APP_INDEX_CACHE_VERSION
+        written = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert written.get("version") == APP_INDEX_CACHE_VERSION
+        assert "commands" in written["apps"][0]
+
