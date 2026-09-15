@@ -5,4 +5,4 @@ description: Control a local interactive Windows desktop for simple app, file, w
 
 # Repository adapter
 
-Resolve `../../../` from this adapter to an absolute runtime root, read that root's `SKILL.md` completely, and follow it. Invoke `scripts/lcu_tools.py` by its absolute path; never resolve the runtime from the host's current working directory.
+Resolve `../../../` from this adapter to an absolute runtime root, read that root's `SKILL.md` completely, and follow it. Invoke `scripts/lcu.py` by its absolute path; never resolve the runtime from the host's current working directory.
