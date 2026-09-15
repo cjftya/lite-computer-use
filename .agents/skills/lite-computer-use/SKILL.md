@@ -91,6 +91,7 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
   - 검색 입력 후 Enter를 친 뒤 결과 화면이 로딩되었을 때 비로소 캡처합니다.
 
 ### 2.4 Task 완료 및 Context 압축
+- GUI batch 성공 자체는 Task 완료가 아니다. `done_when` 확인에 새 화면 정보가 필요하면 Observation Boundary에서 Capture 후 완료합니다.
 - Task가 완료되면 이전 스크린샷 이미지, 픽셀 좌표, 도구의 전체 raw JSON 응답, 상세 reasoning을 컨텍스트에서 폐기합니다.
 - `completed_tasks_summary`에 한 줄 요약 및 다음 Task에 필요한 최소 결과값(`path`, `url`, `hwnd` 등)만 유지합니다.
 

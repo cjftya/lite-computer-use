@@ -224,7 +224,7 @@ Task를 처리할 때 AI는 반드시 아래의 3단계 우선순위를 따릅�
 
 ### Task 완료 판단
 - **Direct Task**: 도구 호출 성공 시 즉시 완료.
-- **GUI Task**: `batch` 실행 완료 후 `done_when` 조건 충족을 확인하면 완료.
+- **GUI Task**: `batch` 실행 완료 후 `done_when` 조건 충족을 확인하면 완료. GUI action 또는 batch가 성공해도 `done_when`이 새로운 화면 상태를 요구하면 Task를 즉시 완료하지 않는다. Observation Boundary에서 새 Capture 후 완료 조건을 확인한다.
 
 ### Context 압축 (Context Compression)
 Task가 완료되면 LLM 대화 컨텍스트에서 불필요한 과거 세부정보를 적극 폐기합니다:
@@ -315,13 +315,13 @@ Task가 완료되면 LLM 대화 컨텍스트에서 불필요한 과거 세부정
   - 관찰: GUI 조작 필요 -> `screenshot` 1회 (`c_01`)
   - 판단: 검색창 클릭 + 타이핑 + Enter는 현재 화면에서 모두 확정 가능
   - 실행: `batch` [click 검색창, type_text OpenAI, press_key ENTER]
-  - [Observation Boundary 도달] -> 검색 결과 페이지 로딩 완료 -> 완료 (총 Capture 1회)
+  - [Observation Boundary 도달] -> 검색 결과 표시 확인을 위해 `screenshot` 1회 (`c_02`) -> 검색 결과 표시 확인 -> 완료 (총 Capture 2회)
 
 ### 시나리오 4: 검색 결과에서 특정 결과 열기
 - Task 1: 검색 결과 목록에서 공식 사이트 링크를 연다 (`done_when`: 사이트가 열림)
-  - 관찰: 새 화면 시각 정보 필요 -> `screenshot` 1회 (`c_02`)
-  - 판단: 공식 링크 위치 식별 -> `click x y --capture c_02`
-  - 결과: 사이트 열림 -> 완료 (총 Capture 1회)
+  - 관찰: 링크 위치 파악을 위한 `screenshot` 1회 (`c_01`)
+  - 판단: 공식 링크 위치 식별 -> `click x y --capture c_01`
+  - [Observation Boundary 도달] -> 사이트 열림 확인을 위해 `screenshot` 1회 (`c_02`) -> 공식 사이트 열림 확인 -> 완료 (총 Capture 2회)
 
 ### 시나리오 5: 다운로드 폴더에서 파일 찾아 열기
 - Task 1: 다운로드 폴더에서 `report.pdf` 파일을 찾는다 (`done_when`: 파일 경로가 확인됨)

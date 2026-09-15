@@ -249,7 +249,7 @@ def test_scenario_2_notepad_text_entry() -> None:
 
 
 def test_scenario_3_naver_search_observation_boundary() -> None:
-    """3. 네이버 열고 검색: Direct open_url + 1 GUI capture + 1 batch at boundary."""
+    """3. 네이버 열고 검색: Direct open_url + Capture #1 + batch + Observation Boundary + Capture #2 -> complete."""
     plan = create_plan(
         goal="네이버에서 OpenAI 검색",
         tasks=[
@@ -267,7 +267,7 @@ def test_scenario_3_naver_search_observation_boundary() -> None:
     assert metrics.capture_count == 0
 
     # Task 2: GUI interaction required
-    # Observation step 1: capture search page
+    # Step 1: Capture #1 of search page
     metrics.record_capture()
     plan.set_current_capture_id("c_naver_home")
 
@@ -281,16 +281,25 @@ def test_scenario_3_naver_search_observation_boundary() -> None:
     metrics.record_tool_call("batch", batch_actions_count=len(batch_actions))
 
     # Observation Boundary: ENTER is pressed; results will load.
-    # The batch executes all 3 actions without per-click screenshots!
+    # Batch succeeded, but done_when requires verifying "OpenAI 검색 결과 표시됨".
+    # Task must still be active!
+    assert plan.tasks[1].status == "active"
+
+    # Step 2: Capture #2 at Observation Boundary to verify done_when
+    metrics.record_capture()
+    plan.set_current_capture_id("c_naver_results")
+
+    # done_when verified from Capture #2 -> complete Task
     plan.complete_current_task(result={"query": "OpenAI"})
 
     assert plan.tasks[1].status == "completed"
-    assert metrics.capture_count == 1  # Exactly 1 capture for the whole search entry!
-    assert metrics.batch_action_counts == [3]
+    assert metrics.capture_count == 2
+    assert len(metrics.batch_action_counts) == 1
+    assert metrics.batch_action_counts[0] == 3
 
 
 def test_scenario_4_open_specific_search_result() -> None:
-    """4. 검색 결과에서 특정 결과 열기: Capture at observation boundary -> click."""
+    """4. 검색 결과에서 특정 결과 열기: Capture #1 -> click -> Observation Boundary -> Capture #2 -> complete."""
     plan = create_plan(
         goal="공식 사이트 링크 열기",
         tasks=[
@@ -300,17 +309,26 @@ def test_scenario_4_open_specific_search_result() -> None:
     metrics = MetricsTracker()
     metrics.record_task()
 
-    # At the observation boundary after search results loaded:
-    # Agent captures results page
+    # Capture #1: Results page observed to find official site link
     metrics.record_capture()
     plan.set_current_capture_id("c_results_page")
 
-    # Agent identifies the official link coordinates from the capture
+    # Agent identifies the official link coordinates and clicks
     metrics.record_tool_call("click")
+
+    # Click succeeded, but done_when requires verifying "공식 사이트 열림" (Observation Boundary).
+    # Task must still be active!
+    assert plan.tasks[0].status == "active"
+
+    # Capture #2 at Observation Boundary to verify official site opened
+    metrics.record_capture()
+    plan.set_current_capture_id("c_official_site")
+
+    # done_when verified from Capture #2 -> complete Task
     plan.complete_current_task(result={"target": "OpenAI Official Site"})
 
     assert plan.tasks[0].status == "completed"
-    assert metrics.capture_count == 1
+    assert metrics.capture_count == 2
 
 
 def test_scenario_5_download_file_search_and_open() -> None:
