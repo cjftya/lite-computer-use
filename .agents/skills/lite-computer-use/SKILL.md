@@ -6,7 +6,7 @@ description: Control a local interactive Windows desktop for simple app, file, w
 # Lite Computer Use (v2)
 
 Lite Computer Use provides precise, single-execution Windows tools for AI agents.
-AI reasons and plans; Python executes deterministic Windows primitives and returns structured JSON.
+AI reasons, decomposes tasks, and plans; Python executes deterministic Windows primitives and returns structured JSON.
 
 Python CLI entry point:
 ```powershell
@@ -55,13 +55,51 @@ py -3.13 scripts\lcu.py <tool> [args]
 
 ---
 
-## 2. Direct Tool 우선 (Direct-First Routing)
+## 2. Orchestration & Planning Protocol (Phase 2)
 
-AI는 마우스/비전보다 Direct Tool을 항상 최우선으로 선택해야 합니다:
-1. 앱 실행: `open_app notepad` (바탕화면 아이콘 클릭 대신)
-2. URL 열기: `open_url https://www.naver.com` (브라우저 주소창 클릭/타이핑 대신)
-3. 파일 열기: `open_file C:\path\to\doc.pdf` (폴더 더블클릭 탐색 대신)
-4. 창 전환: `focus_window --hwnd 12345` 또는 `focus_window "chrome"` (작업표시줄 클릭 대신)
+AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이션 원칙을 반드시 준수합니다:
+
+### 2.1 Initial Plan & Task Queue
+- 요청을 받으면 클릭 단위가 아닌 **의미 단위의 작은 Task**로 분해합니다.
+- Initial Plan에는 도구 이름, 픽셀 좌표, captureId, retry 계획을 넣지 않습니다.
+- **State 구조**:
+  ```json
+  {
+    "goal": "요청 목표",
+    "tasks": [
+      { "id": 1, "goal": "...", "done_when": "...", "status": "pending|active|completed|failed", "result": null }
+    ],
+    "current_task_index": 0,
+    "completed_tasks_summary": [],
+    "current_capture_id": null,
+    "last_error": null,
+    "recovery_used": false
+  }
+  ```
+
+### 2.2 Direct-First 도구 우선순위
+1. **Direct Tool** (`open_app`, `open_file`, `open_folder`, `open_url`): GUI 클릭/탐색 대신 항상 최우선 사용.
+2. **Discovery Tool** (`find_path`, `list_windows`, `focus_window`): 경로 및 창 식별에 우선 사용.
+3. **GUI Vision** (`screenshot` -> `batch`): Direct/Discovery로 해결할 수 없을 때만 최후에 사용.
+- Direct Tool 성공 시 별도 Screenshot 없이 해당 Task를 즉시 완료합니다.
+
+### 2.3 Observation Boundary & Batching
+- **핵심 불변 규칙**:
+  현재 화면에서 확정할 수 있는 모든 행동은 **하나의 `batch`**로 묶어 일괄 실행합니다.
+  다음 행동을 결정하기 위해 **새로운 시각 정보가 반드시 필요한 시점(Observation Boundary)**에서만 Screenshot을 1회 촬영합니다.
+  - 클릭할 때마다 캡처하지 않습니다.
+  - 검색 입력 후 Enter를 친 뒤 결과 화면이 로딩되었을 때 비로소 캡처합니다.
+
+### 2.4 Task 완료 및 Context 압축
+- Task가 완료되면 이전 스크린샷 이미지, 픽셀 좌표, 도구의 전체 raw JSON 응답, 상세 reasoning을 컨텍스트에서 폐기합니다.
+- `completed_tasks_summary`에 한 줄 요약 및 다음 Task에 필요한 최소 결과값(`path`, `url`, `hwnd` 등)만 유지합니다.
+
+### 2.5 Failure Plan & 단 1회 Recovery 제한 (`recovery_used`)
+- 실패 발생 시 문제를 파악하고 명확한 대안이 있는지 검토합니다.
+- 명확한 대안이 있고 `recovery_used == false`인 경우:
+  `recovery_used = true`로 설정하고 대안을 **단 1회 실행**합니다.
+- 대안이 없거나 이미 `recovery_used == true`인 상태에서 또 실패하면 **즉시 중단**합니다.
+- 동일한 실패 행동을 반복하는 retry loop를 금지합니다.
 
 ---
 
@@ -140,4 +178,4 @@ py -3.13 scripts\lcu.py batch '[{"action": "click", "x": 300, "y": 150, "capture
 
 - 앱이나 창 검색 시 일치하는 대상이 2개 이상이면 임의 선택하지 않고 즉시 `ambiguous_target` 에러와 후보 목록을 반환합니다.
 - 창이 이동하거나 닫힌 경우 `stale_capture` 에러를 반환합니다.
-- Python 내부에서 임의 재시도나 visual fallback을 시도하지 않습니다. 실패는 즉시 AI에게 보고되어 AI가 다음 행동을 판단합니다.
+- Python 내부에서 임의 재시도나 visual fallback을 시도하지 않습니다. 실패는 즉시 AI에게 보고되어 AI가 Failure Plan에 따라 판단합니다.
