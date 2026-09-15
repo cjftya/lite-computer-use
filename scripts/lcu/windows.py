@@ -232,18 +232,50 @@ def focus_window(query: str | None = None, hwnd: int | None = None) -> dict[str,
         fg_thread, _ = win32process.GetWindowThreadProcessId(fg_hwnd) if fg_hwnd else (0, 0)
         target_thread, _ = win32process.GetWindowThreadProcessId(target_hwnd)
 
+        attached_curr = False
+        attached_fg = False
         try:
-            if fg_thread and fg_thread != target_thread:
-                win32process.AttachThreadInput(fg_thread, target_thread, True)
-            win32process.AttachThreadInput(curr_thread, target_thread, True)
-
-            win32gui.BringWindowToTop(target_hwnd)
-            win32gui.SetForegroundWindow(target_hwnd)
-        finally:
             try:
-                win32process.AttachThreadInput(curr_thread, target_thread, False)
                 if fg_thread and fg_thread != target_thread:
+                    win32process.AttachThreadInput(fg_thread, target_thread, True)
+                    attached_fg = True
+                win32process.AttachThreadInput(curr_thread, target_thread, True)
+                attached_curr = True
+            except Exception:
+                # UWP / UIPI permission denied: proceed without raising
+                pass
+
+            try:
+                win32gui.BringWindowToTop(target_hwnd)
+                win32gui.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+        finally:
+            if attached_curr:
+                try:
+                    win32process.AttachThreadInput(curr_thread, target_thread, False)
+                except Exception:
+                    pass
+            if attached_fg:
+                try:
                     win32process.AttachThreadInput(fg_thread, target_thread, False)
+                except Exception:
+                    pass
+
+        # Fallback 1: Synthesize Alt key event to unlock Windows foreground lock
+        if win32gui.GetForegroundWindow() != target_hwnd:
+            try:
+                ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
+                ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
+                win32gui.BringWindowToTop(target_hwnd)
+                win32gui.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+
+        # Fallback 2: SwitchToThisWindow
+        if win32gui.GetForegroundWindow() != target_hwnd:
+            try:
+                ctypes.windll.user32.SwitchToThisWindow(target_hwnd, True)
             except Exception:
                 pass
 

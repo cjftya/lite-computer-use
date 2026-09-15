@@ -13,11 +13,15 @@ apps:
 
   notepad:
     aliases: [notepad, 메모장]
-    commands: [notepad.exe]
+    commands:
+      - notepad.exe
+      - "shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
 
   calculator:
     aliases: [calculator, calc, 계산기]
-    commands: [calc.exe]
+    commands:
+      - calc.exe
+      - "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
 
   explorer:
     aliases: [explorer, file explorer, 파일 탐색기, 탐색기]
@@ -65,7 +69,9 @@ apps:
 
   settings:
     aliases: [settings, windows settings, 설정, 윈도우 설정]
-    commands: ["ms-settings:"]
+    commands:
+      - "ms-settings:"
+      - "shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"
 
   task-manager:
     aliases: [task manager, 작업 관리자]

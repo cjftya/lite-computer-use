@@ -182,3 +182,45 @@ def test_open_app_mocked() -> None:
         with pytest.raises(LCUError) as exc_info:
             open_app("nonexistent")
         assert exc_info.value.code == "not_found"
+
+
+def test_open_app_packaged_fallback_on_missing_window() -> None:
+    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        "Notepad",
+        "notepad.exe",
+        "config",
+        ["notepad", "메모장"],
+        "notepad",
+        commands=["notepad.exe", app_x_cmd],
+    )
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", return_value=[]), \
+         patch("time.sleep"):
+        res = open_app("notepad")
+        assert res["app"] == "Notepad"
+        assert res["target"] == app_x_cmd
+        assert mock_start.call_count == 2
+        mock_start.assert_any_call("notepad.exe")
+        mock_start.assert_any_call(app_x_cmd)
+
+
+def test_open_app_packaged_fallback_on_dispatch_error() -> None:
+    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        "Calculator",
+        "calc.exe",
+        "config",
+        ["calculator", "계산기"],
+        "calculator",
+        commands=["calc.exe", app_x_cmd],
+    )
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile", side_effect=[OSError("Failed to start calc.exe"), None]) as mock_start:
+        res = open_app("calculator")
+        assert res["app"] == "Calculator"
+        assert res["target"] == app_x_cmd
+        assert mock_start.call_count == 2

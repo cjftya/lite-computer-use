@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,11 @@ class AppEntry:
     source: str  # "config", "start-menu", "app-paths"
     aliases: list[str]
     normalized: str
+    commands: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.commands:
+            self.commands = [self.target]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,6 +46,7 @@ class AppEntry:
             source=d["source"],
             aliases=d.get("aliases", []),
             normalized=d.get("normalized", normalize_app_name(d["name"])),
+            commands=d.get("commands", [d["target"]]),
         )
 
 
@@ -77,9 +83,10 @@ def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
             if not isinstance(app_info, dict):
                 continue
             aliases = app_info.get("aliases", [])
-            commands = app_info.get("commands", [])
-            if not commands:
+            raw_cmds = app_info.get("commands", [])
+            if not raw_cmds:
                 continue
+            commands = [str(c) for c in raw_cmds]
             target = commands[0]
             name = str(app_id)
             all_aliases = [name] + [str(a) for a in aliases]
@@ -90,6 +97,7 @@ def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
                     source="config",
                     aliases=all_aliases,
                     normalized=normalize_app_name(name),
+                    commands=commands,
                 )
             )
     return entries
@@ -279,13 +287,42 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
     if entry is None:
         raise LCUError("not_found", f"No application found matching '{name}'")
 
-    target = entry.target
-    try:
-        if os.name == "nt":
-            os.startfile(target)
-        else:
-            subprocess.Popen(target, shell=True)
-    except Exception as exc:
-        raise LCUError("dispatch_failed", f"Failed to launch application '{name}' ({target}): {exc}") from exc
+    commands_to_try = getattr(entry, "commands", None) or [entry.target]
+    last_exc = None
+    executed_target = None
 
-    return {"app": entry.name, "target": target}
+    for idx, target in enumerate(commands_to_try):
+        try:
+            if os.name == "nt":
+                os.startfile(target)
+            else:
+                subprocess.Popen(target, shell=True)
+            executed_target = target
+
+            # If there is a packaged app fallback candidate, verify UI window creation on Windows
+            if idx == 0 and len(commands_to_try) > 1 and os.name == "nt":
+                time.sleep(0.25)
+                try:
+                    from .windows import list_windows
+
+                    wins = list_windows(query=entry.name)
+                    if not wins:
+                        for alias in entry.aliases:
+                            wins = list_windows(query=alias)
+                            if wins:
+                                break
+                    if not wins:
+                        # Primary executable dispatched but no visible UI window found; try packaged AppX candidate
+                        continue
+                except Exception:
+                    pass
+
+            break
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    if executed_target is None:
+        raise LCUError("dispatch_failed", f"Failed to launch application '{name}' ({entry.target}): {last_exc}") from last_exc
+
+    return {"app": entry.name, "target": executed_target}
