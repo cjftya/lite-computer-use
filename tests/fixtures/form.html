@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>LCU Production Test Form</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 40px; background: #f8fafc; color: #1e293b; }
+    .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+    h2 { margin-top: 0; }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 14px; }
+    input[type="text"], input[type="email"], select, textarea {
+      width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; box-sizing: border-box;
+    }
+    .checkbox-group { display: flex; gap: 16px; margin-top: 8px; }
+    .checkbox-label { display: flex; align-items: center; gap: 6px; font-weight: normal; cursor: pointer; }
+    .btn { background: #2563eb; color: white; border: none; padding: 12px 20px; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; width: 100%; }
+    .btn:hover { background: #1d4ed8; }
+    .hidden { display: none; }
+    .success-box { text-align: center; padding: 20px; background: #ecfdf5; border: 1px solid #10b981; border-radius: 6px; color: #065f46; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <!-- Step 1 -->
+  <div id="step1">
+    <h2>회원 정보 입력 (1단계)</h2>
+    <div class="form-group">
+      <label for="name">이름</label>
+      <input type="text" id="name" placeholder="이름을 입력하세요">
+    </div>
+    <div class="form-group">
+      <label for="email">이메일</label>
+      <input type="email" id="email" placeholder="example@email.com">
+    </div>
+    <div class="form-group">
+      <label for="country">국가</label>
+      <select id="country">
+        <option value="">국가를 선택하세요</option>
+        <option value="United States">United States</option>
+        <option value="South Korea">South Korea</option>
+        <option value="Japan">Japan</option>
+        <option value="Germany">Germany</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>옵션 선택</label>
+      <div class="checkbox-group">
+        <label class="checkbox-label"><input type="checkbox" id="optA" value="A"> 옵션 A</label>
+        <label class="checkbox-label"><input type="checkbox" id="optB" value="B"> 옵션 B</label>
+        <label class="checkbox-label"><input type="checkbox" id="optC" value="C"> 옵션 C</label>
+      </div>
+    </div>
+    <button type="button" class="btn" id="btnContinue" onclick="goStep2()">Continue</button>
+  </div>
+
+  <!-- Step 2 -->
+  <div id="step2" class="hidden">
+    <h2>추가 메모 작성 (2단계)</h2>
+    <div class="form-group">
+      <label for="memo">메모</label>
+      <textarea id="memo" rows="4" placeholder="메모를 입력하세요"></textarea>
+    </div>
+    <button type="button" class="btn" id="btnSubmit" onclick="submitForm()">Submit</button>
+  </div>
+
+  <!-- Complete -->
+  <div id="stepComplete" class="hidden">
+    <div class="success-box">
+      <h2>완료되었습니다!</h2>
+      <p id="summaryText"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+  function goStep2() {
+    document.getElementById('step1').classList.add('hidden');
+    document.getElementById('step2').classList.remove('hidden');
+  }
+  function submitForm() {
+    const name = document.getElementById('name').value;
+    const email = document.getElementById('email').value;
+    const country = document.getElementById('country').value;
+    const optB = document.getElementById('optB').checked ? 'B' : '';
+    const optC = document.getElementById('optC').checked ? 'C' : '';
+    const memo = document.getElementById('memo').value;
+
+    document.getElementById('step2').classList.add('hidden');
+    document.getElementById('stepComplete').classList.remove('hidden');
+    document.getElementById('summaryText').innerText =
+      `제출 정보: ${name} (${email}), 국가: ${country}, 선택 옵션: ${[optB, optC].filter(Boolean).join(', ')}, 메모: ${memo}`;
+  }
+</script>
+</body>
+</html>

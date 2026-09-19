@@ -16,8 +16,10 @@ from scripts.lcu.apps import (
     _is_packaged_app_command,
     _wait_for_visible_app_window,
     build_app_index,
+    candidate_priority_key,
     classify_launch_method,
     find_app_entry,
+    load_config_apps,
     normalize_app_name,
     open_app,
 )
@@ -693,4 +695,51 @@ def test_open_app_single_existing_window_reused_d3() -> None:
         assert res["launch_method"] == "existing-window"
         mock_focus.assert_called_once_with(hwnd=888333)
         mock_start.assert_not_called()
+
+
+def test_candidate_args_and_priority_serialization() -> None:
+    """Test LaunchCandidate serialization and priority key calculation"""
+    cand = LaunchCandidate(
+        target="chrome.exe",
+        method="exe",
+        source="config",
+        args=("--new-window", "about:blank"),
+        priority=0,
+    )
+    d = cand.to_dict()
+    assert d["target"] == "chrome.exe"
+    assert d["args"] == ["--new-window", "about:blank"]
+    assert d["priority"] == 0
+
+    restored = LaunchCandidate.from_dict(d)
+    assert restored.target == "chrome.exe"
+    assert restored.args == ("--new-window", "about:blank")
+    assert restored.priority == 0
+    assert candidate_priority_key(restored) == 0
+
+    plain_cand = LaunchCandidate(target="chrome.exe", method="exe", source="config")
+    assert candidate_priority_key(plain_cand) == 5
+
+
+def test_structured_commands_loaded_from_apps_yaml() -> None:
+    """Test load_config_apps parses structured commands with args and priority"""
+    config_path = Path(__file__).resolve().parent.parent / "config" / "apps.yaml"
+    entries = load_config_apps(config_path)
+    chrome_entry = next((e for e in entries if e.name == "chrome"), None)
+    assert chrome_entry is not None
+    assert len(chrome_entry.candidates) >= 2
+    # First candidate has priority 0 and args --new-window
+    first_cand = chrome_entry.candidates[0]
+    assert first_cand.target == "chrome.exe"
+    assert first_cand.args == ("--new-window", "about:blank")
+    assert first_cand.priority == 0
+
+    vscode_entry = next((e for e in entries if e.name == "vscode"), None)
+    assert vscode_entry is not None
+    assert len(vscode_entry.candidates) >= 2
+    first_code = vscode_entry.candidates[0]
+    assert first_code.target == "code.exe"
+    assert first_code.args == ("--new-window",)
+    assert first_code.priority == 0
+
 

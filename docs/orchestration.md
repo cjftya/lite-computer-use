@@ -68,7 +68,7 @@ Task Queue 생성 (첫 번째 Task -> active)
     ↓
 [Cleanup Phase] (Resource Cleanup)
     ├─ Task Result에서 새로 열린 temporary app 확인 (reused_existing == false)
-    ├─ close_window --hwnd <hwnd> (역순 종료)
+    ├─ close_window --hwnd <hwnd> [--owned-processes '<json>'] (역순 종료 및 잔류 owned process 안전 정리)
     └─ Cleanup 종료 -> 최종 결과 보고
 ```
 
@@ -246,7 +246,7 @@ Task가 완료되면 LLM 대화 컨텍스트에서 불필요한 과거 세부정
 - **유지할 데이터**:
   - 한 줄 완료 요약 (`completed_tasks_summary`)
   - 다음 Task에 전달할 핵심 결과값 (`result` - 파일 경로, URL, 창 hwnd 등)
-  - **Context 압축 예외**: 작업 중 새로 열린 앱의 `hwnd`, `reused_existing`, `launch_method`는 Goal 종료 직전 Cleanup을 위해 Task `result`에 보존해야 하며, cleanup이 완료된 뒤 폐기합니다.
+  - **Context 압축 예외**: 작업 중 새로 열린 앱의 `hwnd`, `reused_existing`, `launch_method`, `window_pid`, `window_process`, `owned_processes`는 Goal 종료 직전 Cleanup을 위해 Task `result`에 보존해야 하며, cleanup이 완료된 뒤 폐기합니다.
 
 ---
 
@@ -358,7 +358,7 @@ Task가 완료되면 LLM 대화 컨텍스트에서 불필요한 과거 세부정
 
 ## 16. 자원 정리 규칙 (Resource Cleanup Protocol)
 
-작업(Goal) 완료 직전에 AI Orchestrator는 완료된 Task의 `result`를 확인하여 임시 앱을 안전하게 정리합니다:
+작업(Goal) 완료 직전에 AI Orchestrator는 완료된 Task의 `result`를 확인하여 임시 앱과 잔류 프로세스를 안전하게 정리합니다:
 
 ### 전체 실행 흐름
 ```text
@@ -366,24 +366,25 @@ Goal Completed (모든 본 작업 완료)
     ↓
 Task result에서 새로 열린 temporary app 확인 (reused_existing == false)
     ↓
-close_window --hwnd <hwnd> (역순 종료)
+close_window --hwnd <hwnd> --owned-processes '<json>' (역순 종료)
     ↓
 Cleanup 종료 -> 최종 결과 보고
 ```
 
 ### Cleanup 실행 규칙
 1. **역순 종료**: 여러 앱을 실행한 경우 최근에 실행한 앱부터 역순으로 닫습니다.
-2. **종료 판정**: `close_window`는 대상 HWND가 실제로 파괴(`IsWindow == false`)되었을 때만 성공으로 판정합니다. 단순 hidden 또는 cloaked 상태는 성공으로 처리하지 않습니다.
-3. **Cleanup 실패 처리**:
+2. **종료 판정**: `close_window`는 대상 HWND가 실제로 파괴(`IsWindow == false`)되었을 때만 성공으로 판정합니다. 단순 hidden 또는 cloaked 상태는 성공으로 처리하지 않으며, 기본 timeout은 4.0초(early-exit polling 유지)입니다.
+3. **Owned Process 정리**: HWND가 파괴된 후 대상 앱에 정리 정책(`owned-after-close`)이 설정되어 있고 잔류 `owned_processes`가 있으면, 자연 종료 대기 후 Process Termination Safety Gate(8개 조건)를 통과한 프로세스만 안전하게 종료합니다.
+4. **Cleanup 실패 처리**:
    - Cleanup은 본 작업 결과를 뒤집지 않습니다.
    - 예: Main Goal 성공 후 Calculator 창 닫기 실패 시, 작업 자체는 성공으로 유지하고 cleanup warning만 기록합니다.
-   - 창이 닫히지 않는다고 강제 프로세스 종료(`taskkill /F`, `os.kill`)를 호출하지 않습니다.
+   - 프로세스 이름 기반 일괄 강제 종료(`taskkill /IM`, `Stop-Process -Name`)는 엄격히 금지됩니다.
 
 ---
 
-## 17. 앱 소유권 규칙 (App Ownership Rules)
+## 17. 앱 및 프로세스 소유권 규칙 (App & Process Ownership Rules)
 
-AI Orchestrator가 어떤 창을 닫고 어떤 창을 유지해야 하는지에 대한 엄격한 소유권 원칙입니다:
+AI Orchestrator가 어떤 창/프로세스를 닫고 어떤 것을 유지해야 하는지에 대한 엄격한 소유권 원칙입니다:
 
 ### 자동 종료 대상 (모두 충족 시에만)
 1. `open_app`으로 에이전트가 직접 실행함 (`launch_method`가 `appsfolder`, `start-menu`, `uri`, `app-paths`, `exe` 중 하나).
@@ -391,11 +392,12 @@ AI Orchestrator가 어떤 창을 닫고 어떤 창을 유지해야 하는지에 
 3. `app`과 `launch_method` 정보가 존재하는 창.
 4. 해당 앱이 중간 작업용(temporary/intermediate)임.
 5. 사용자의 최종 결과물(final result)로 남길 필요가 없음.
-→ `close_window --hwnd <hwnd>`
+→ `close_window --hwnd <hwnd> --owned-processes '<json>'`
 
 ### 자동 종료 금지 (반드시 유지)
-1. **기존 사용자 앱**: `reused_existing == true`인 창은 절대 닫지 않습니다.
+1. **기존 사용자 앱/창**: `reused_existing == true`인 창은 절대 닫지 않습니다.
 2. **소유권 불명확 창**: `reused_existing` 필드가 누락되었거나 `focus_window` 등 타 도구 실행 결과로 남은 HWND는 절대 닫지 않습니다.
 3. **최종 결과 앱**: 예컨대 "계산기로 계산하고 결과를 메모장에 적어줘" 요청에서 메모장은 사용자가 확인해야 할 최종 결과이므로 닫지 않습니다.
-4. **기존 브라우저 창/탭**: 사용자가 열어둔 브라우저 인스턴스는 유지합니다.
+4. **기존 브라우저 창/탭 및 기존 사용자 프로세스**: 사용자가 사전에 실행해 둔 브라우저/에디터/도구의 baseline 프로세스는 창을 닫더라도 절대 종료하지 않습니다.
+5. **시스템/공유 프로세스**: `ApplicationFrameHost`, `RuntimeBroker`, `explorer.exe` 등 시스템 프로세스는 denylist로 보호되며 절대 종료 대상에 포함되지 않습니다.
 

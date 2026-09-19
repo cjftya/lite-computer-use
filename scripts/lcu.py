@@ -111,6 +111,7 @@ def main() -> None:
     p_close_window = subparsers.add_parser("close_window")
     p_close_window.add_argument("query", nargs="?", default=None, help="Window title query")
     p_close_window.add_argument("--hwnd", type=int, default=None, help="Window handle")
+    p_close_window.add_argument("--owned-processes", default=None, help="JSON string or file path containing owned process metadata to clean up")
 
     p_set_window_bounds = subparsers.add_parser("set_window_bounds")
     p_set_window_bounds.add_argument("--x", type=int, required=True, help="Left position")
@@ -254,7 +255,23 @@ def main() -> None:
             print(output_json(format_success("focus_window", res)))
 
         elif action == "close_window":
-            res = windows.close_window(query=args.query, hwnd=args.hwnd)
+            owned_procs = None
+            if getattr(args, "owned_processes", None):
+                raw_owned = args.owned_processes.strip()
+                if raw_owned.startswith("[") or raw_owned.startswith("{"):
+                    data = json.loads(raw_owned)
+                else:
+                    data = json.loads(Path(raw_owned).read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    owned_procs = data
+                elif isinstance(data, dict):
+                    owned_procs = [data]
+
+            res = windows.close_window(
+                query=args.query,
+                hwnd=args.hwnd,
+                owned_processes=owned_procs,
+            )
             print(output_json(format_success("close_window", res)))
 
         elif action == "set_window_bounds":

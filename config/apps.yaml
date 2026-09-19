@@ -1,7 +1,15 @@
 apps:
   chrome:
     aliases: [chrome, google chrome, 크롬, 구글 크롬]
-    commands: [chrome.exe]
+    commands:
+      - target: chrome.exe
+        args: ["--new-window", "about:blank"]
+        priority: 0
+      - chrome.exe
+    process_cleanup:
+      mode: rollback-on-failure
+      process_names:
+        - chrome.exe
 
   edge:
     aliases: [edge, microsoft edge, 엣지, 마이크로소프트 엣지]
@@ -16,6 +24,10 @@ apps:
     commands:
       - "shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
       - notepad.exe
+    process_cleanup:
+      mode: owned-after-close
+      process_names:
+        - Notepad.exe
 
   calculator:
     aliases: [calculator, calc, 계산기]
@@ -52,7 +64,16 @@ apps:
 
   vscode:
     aliases: [vscode, visual studio code, vs code, 비주얼 스튜디오 코드]
-    commands: [code.exe, code.cmd]
+    commands:
+      - target: code.exe
+        args: ["--new-window"]
+        priority: 0
+      - code.exe
+      - code.cmd
+    process_cleanup:
+      mode: rollback-on-failure
+      process_names:
+        - Code.exe
 
   paint:
     aliases: [paint, microsoft paint, 그림판]

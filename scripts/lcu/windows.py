@@ -160,6 +160,7 @@ def list_windows(query: str | None = None) -> list[dict[str, Any]]:
         windows.append(
             {
                 "hwnd": hwnd,
+                "pid": pid,
                 "title": title,
                 "process": proc_name,
                 "active": is_active,
@@ -191,6 +192,7 @@ def find_target_window(query: str | None = None, hwnd: int | None = None) -> dic
         proc = get_process_name_for_pid(pid) or ""
         return {
             "hwnd": hwnd,
+            "pid": pid,
             "title": title,
             "process": proc,
             "active": (hwnd == win32gui.GetForegroundWindow()),
@@ -279,8 +281,16 @@ def focus_window(query: str | None = None, hwnd: int | None = None) -> dict[str,
             except Exception:
                 pass
 
-    time.sleep(0.08)
+    # Ensure window has reached foreground
     new_fg = win32gui.GetForegroundWindow()
+    if new_fg != target_hwnd:
+        t_end = time.time() + 0.5
+        while time.time() < t_end:
+            time.sleep(0.05)
+            new_fg = win32gui.GetForegroundWindow()
+            if new_fg == target_hwnd:
+                break
+
     if new_fg != target_hwnd:
         raise LCUError("window_focus_failed", f"Failed to focus window (hwnd: {target_hwnd}, title: '{target['title']}')")
 
@@ -290,8 +300,10 @@ def focus_window(query: str | None = None, hwnd: int | None = None) -> dict[str,
 def close_window(
     query: str | None = None,
     hwnd: int | None = None,
-    timeout: float = 2.0,
+    timeout: float = 4.0,
     interval: float = 0.05,
+    owned_processes: list[dict[str, Any] | Any] | None = None,
+    cleanup_owned_processes: bool = True,
 ) -> dict[str, Any]:
     init_windows_environment()
     import win32con
@@ -310,31 +322,80 @@ def close_window(
         try:
             return not bool(win32gui.IsWindow(h))
         except Exception:
-            return True
+            return False
 
     t_end = time.time() + timeout
     max_checks = max(1, int(round(timeout / interval)) + 1) if interval > 0 else 1
     checks = 0
 
+    destroyed = False
     while checks < max_checks:
         if interval > 0:
             time.sleep(interval)
         checks += 1
 
         if is_window_destroyed(target_hwnd):
-            return {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+            destroyed = True
+            break
 
         if time.time() >= t_end or checks >= max_checks:
             break
 
-    # Final check
-    if is_window_destroyed(target_hwnd):
-        return {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+    # Final check if loop ended without seeing destruction
+    if not destroyed:
+        destroyed = is_window_destroyed(target_hwnd)
 
-    raise LCUError(
-        "window_close_failed",
-        f"Failed to close window (hwnd: {target_hwnd}, title: '{target['title']}') within {timeout}s",
-    )
+    if not destroyed:
+        raise LCUError(
+            "window_close_failed",
+            f"Failed to close window (hwnd: {target_hwnd}, title: '{target['title']}') within {timeout}s",
+        )
+
+    cleaned_processes: list[int] = []
+
+    # Owned process cleanup (Section 14 & 23)
+    if owned_processes and cleanup_owned_processes:
+        from .processes import (
+            ProcessIdentity,
+            is_process_alive,
+            terminate_process,
+            validate_termination_safety,
+        )
+
+        parsed_identities: list[ProcessIdentity] = []
+        for p in owned_processes:
+            if isinstance(p, ProcessIdentity):
+                parsed_identities.append(p)
+            elif isinstance(p, dict):
+                mode = p.get("cleanup_mode")
+                if mode == "rollback-on-failure":
+                    continue
+                parsed_identities.append(ProcessIdentity.from_dict(p))
+
+        if parsed_identities:
+            # 1. Natural exit wait: poll up to 1.0s
+            t_exit_end = time.time() + 1.0
+            while time.time() < t_exit_end:
+                if not any(is_process_alive(p) for p in parsed_identities):
+                    break
+                time.sleep(0.1)
+
+            # 2. For any still alive, perform safety validation and terminate
+            for p in parsed_identities:
+                if not is_process_alive(p):
+                    continue
+                safe, reason = validate_termination_safety(
+                    identity=p,
+                    exclude_hwnd=target_hwnd,
+                )
+                if safe:
+                    if terminate_process(p, timeout=2.0):
+                        cleaned_processes.append(p.pid)
+
+    res: dict[str, Any] = {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+    if cleaned_processes:
+        res["cleaned_processes"] = cleaned_processes
+    return res
 
 
 

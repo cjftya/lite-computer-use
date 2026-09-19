@@ -100,8 +100,9 @@ py -3.13 scripts\lcu.py list_windows --query chrome
 py -3.13 scripts\lcu.py focus_window --hwnd 12345
 py -3.13 scripts\lcu.py focus_window "Visual Studio Code"
 
-# Close window (standard WM_CLOSE, verifies window destruction via polling, no force-kill)
+# Close window (standard WM_CLOSE, verifies window destruction via polling, optional --owned-processes for safe orphan cleanup)
 py -3.13 scripts\lcu.py close_window --hwnd 12345
+py -3.13 scripts\lcu.py close_window --hwnd 12345 --owned-processes '[{"pid": 4321, "creation_time": 12345, "process_name": "Notepad.exe"}]'
 
 # Position and resize window (stabilize coordinate space)
 py -3.13 scripts\lcu.py set_window_bounds --hwnd 12345 --x 100 --y 100 --width 1400 --height 900

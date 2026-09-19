@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>LCU Settings & Modal Fixture</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 40px; background: #f1f5f9; color: #0f172a; }
+    .card { max-width: 550px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+    .btn { background: #3b82f6; color: white; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    .btn-secondary { background: #64748b; }
+    .btn-danger { background: #ef4444; }
+    .menu-tabs { display: flex; gap: 10px; margin: 20px 0; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; }
+    .tab-btn { background: none; border: none; padding: 8px 16px; font-weight: 600; cursor: pointer; color: #64748b; }
+    .tab-btn.active { color: #2563eb; border-bottom: 2px solid #2563eb; }
+    .toggle-group { display: flex; align-items: center; justify-content: space-between; padding: 15px 0; border-bottom: 1px solid #e2e8f0; }
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
+    .modal { background: white; padding: 25px; border-radius: 8px; width: 350px; text-align: center; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+    .hidden { display: none; }
+    .alert-success { background: #dcfce7; color: #15803d; padding: 14px; border-radius: 6px; margin-top: 20px; font-weight: 600; text-align: center; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h2>시스템 제어판</h2>
+  <button class="btn" id="btnSettings" onclick="openSettings()">Settings</button>
+
+  <div id="settingsView" class="hidden" style="margin-top: 20px;">
+    <div class="menu-tabs">
+      <button class="tab-btn" onclick="showTab('general')">General</button>
+      <button class="tab-btn" id="tabAdvanced" onclick="showTab('advanced')">Advanced</button>
+    </div>
+
+    <div id="tabContentGeneral">
+      <p>일반 설정 항목입니다.</p>
+    </div>
+
+    <div id="tabContentAdvanced" class="hidden">
+      <div class="toggle-group">
+        <span><strong>Test Mode</strong> 활성화</span>
+        <input type="checkbox" id="toggleTestMode" style="width: 20px; height: 20px; cursor: pointer;">
+      </div>
+      <div style="margin-top: 15px; text-align: right;">
+        <button class="btn" id="btnApply" onclick="promptConfirm()">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="successMsg" class="alert-success hidden">
+    Test Mode가 활성화되었습니다.
+  </div>
+</div>
+
+<!-- Modal -->
+<div id="confirmModal" class="modal-backdrop hidden">
+  <div class="modal">
+    <h3>설정 적용 확인</h3>
+    <p>Test Mode 변경 사항을 적용하시겠습니까?</p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="btnConfirm" onclick="confirmApply()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  function openSettings() {
+    document.getElementById('settingsView').classList.remove('hidden');
+  }
+  function showTab(tab) {
+    if (tab === 'advanced') {
+      document.getElementById('tabContentGeneral').classList.add('hidden');
+      document.getElementById('tabContentAdvanced').classList.remove('hidden');
+      document.getElementById('tabAdvanced').classList.add('active');
+    } else {
+      document.getElementById('tabContentGeneral').classList.remove('hidden');
+      document.getElementById('tabContentAdvanced').classList.add('hidden');
+      document.getElementById('tabAdvanced').classList.remove('active');
+    }
+  }
+  function promptConfirm() {
+    document.getElementById('confirmModal').classList.remove('hidden');
+  }
+  function closeModal() {
+    document.getElementById('confirmModal').classList.add('hidden');
+  }
+  function confirmApply() {
+    closeModal();
+    const isChecked = document.getElementById('toggleTestMode').checked;
+    if (isChecked) {
+      document.getElementById('successMsg').classList.remove('hidden');
+    }
+  }
+</script>
+</body>
+</html>

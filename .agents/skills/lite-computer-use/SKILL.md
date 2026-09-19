@@ -18,7 +18,7 @@ py -3.13 scripts\lcu.py <tool> [args]
 ## 1. Tool 목록 (Public Tools)
 
 ### Open & Discovery
-- `open_app <name>`: Launch application with priority strategy (AppsFolder -> Start Menu -> URI -> App Paths -> direct exe), verify visible window, and bring to foreground. Returns verified `hwnd`, `launch_method`, and `reused_existing`. Reuses and restores single existing window automatically.
+- `open_app <name>`: Launch application with priority strategy (AppsFolder -> Start Menu -> URI -> App Paths -> direct exe), verify visible window, and bring to foreground. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and `owned_processes` (tracking newly created processes under process ownership model). Reuses and restores single existing window automatically.
 - `open_file <absolute-path>`: Open file with default associated application.
 - `open_folder <absolute-path-or-alias>`: Open folder in Explorer (`desktop`, `documents`, `downloads`, `바탕화면`, `문서`, `다운로드`).
 - `open_url <url>`: Open `http://` or `https://` URL in default browser.
@@ -26,9 +26,9 @@ py -3.13 scripts\lcu.py <tool> [args]
 - `find_path <query> --root <root> [--kind any|file|folder] [--limit 10]`: Bounded search under root.
 
 ### Window Management
-- `list_windows [--query <query>]`: List visible top-level windows (`hwnd`, `title`, `process`, `active`, `bounds`).
+- `list_windows [--query <query>]`: List visible top-level windows (`hwnd`, `pid`, `title`, `process`, `active`, `bounds`).
 - `focus_window [query] [--hwnd <int>]`: Restore and bring window to foreground.
-- `close_window [query] [--hwnd <int>]`: Send standard WM_CLOSE and verify actual HWND destruction via polling (no force-kill; hidden or cloaked status alone is not considered closed).
+- `close_window [query] [--hwnd <int>] [--owned-processes <json>]`: Send standard WM_CLOSE and verify actual HWND destruction via polling (default timeout 4.0s with early-exit; no force-kill; hidden or cloaked status alone is not considered closed). When `--owned-processes` is passed, lingering owned processes are safely terminated after window destruction.
 - `set_window_bounds --x <int> --y <int> --width <int> --height <int> [--hwnd <int>]`: Resize and reposition window.
 
 ### Vision & Screenshot
@@ -94,7 +94,7 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 - GUI batch 성공 자체는 Task 완료가 아니다. `done_when` 확인에 새 화면 정보가 필요하면 Observation Boundary에서 Capture 후 완료합니다.
 - Task가 완료되면 이전 스크린샷 이미지, 픽셀 좌표, 도구의 전체 raw JSON 응답, 상세 reasoning을 컨텍스트에서 폐기합니다.
 - `completed_tasks_summary`에 한 줄 요약 및 다음 Task에 필요한 최소 결과값(`path`, `url`, `hwnd` 등)만 유지합니다.
-- **Context 압축 예외**: 작업 중 새로 열린 앱의 `hwnd`, `reused_existing`, `launch_method`는 Goal 종료 전 Cleanup을 위해 Task result에 보존해야 하며, cleanup이 완료된 뒤 폐기합니다.
+- **Context 압축 예외**: 작업 중 새로 열린 앱의 `hwnd`, `reused_existing`, `launch_method`, `window_pid`, `window_process`, `owned_processes`는 Goal 종료 전 Cleanup을 위해 Task result에 보존해야 하며, cleanup이 완료된 뒤 폐기합니다.
 
 ### 2.5 Failure Plan & 단 1회 Recovery 제한 (`recovery_used`)
 - 실패 발생 시 문제를 파악하고 명확한 대안이 있는지 검토합니다.
@@ -104,9 +104,9 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 - 동일한 실패 행동을 반복하는 retry loop를 금지합니다.
 
 ### 2.6 Resource Cleanup Protocol (End-of-Goal Cleanup)
-작업(Goal) 완료 직전에 AI Orchestrator는 완료된 Task의 `result`를 확인하여 임시 앱을 안전하게 정리합니다:
+작업(Goal) 완료 직전에 AI Orchestrator는 완료된 Task의 `result`를 확인하여 임시 앱과 잔류 프로세스를 안전하게 정리합니다:
 - **전체 흐름**:
-  Goal completed -> Cleanup Phase -> Task result에서 새로 열린 temporary app 확인 -> `close_window --hwnd <hwnd>` (역순 실행) -> Cleanup 종료
+  Goal completed -> Cleanup Phase -> Task result에서 새로 열린 temporary app 확인 -> `close_window --hwnd <hwnd> --owned-processes '<json>'` (역순 실행) -> Cleanup 종료
 - **자동 종료 대상 (모두 충족 시)**:
   1. `open_app`으로 생성됨 (`launch_method`가 `appsfolder`, `start-menu`, `uri`, `app-paths`, `exe` 중 하나)
   2. `reused_existing == false` (명시적)
@@ -118,10 +118,11 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
   2. `reused_existing` 필드가 누락되었거나 `focus_window` 결과 등 소유권이 불명확한 창
   3. 사용자의 최종 결과로 남겨야 하는 창 (예: "메모장에 결과를 적어줘" 요청의 메모장)
   4. 기존 브라우저 창 또는 탭
+  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 이번 launch에서 새로 생성된 것이 입증된 `owned_processes`만 엄격한 안전성 검증(PID reuse 방지, denylist 제외, 타 창 미소유)을 통과한 후 정리됩니다.
 - **종료 순서**:
   여러 앱을 실행한 경우 최근에 실행한 앱부터 **역순**으로 닫습니다.
 - **Cleanup 실패 처리**:
-  Main Goal이 성공한 경우, cleanup 도중 창 닫기에 실패하더라도 warning만 기록하며 본 작업 결과를 실패로 뒤집지 않습니다. 프로세스 강제 종료(`taskkill /F`, `os.kill`)는 절대 수행하지 않습니다.
+  Main Goal이 성공한 경우, cleanup 도중 창 닫기에 실패하더라도 warning만 기록하며 본 작업 결과를 실패로 뒤집지 않습니다. 임의 프로세스 강제 종료는 절대 수행하지 않습니다.
 
 ---
 
