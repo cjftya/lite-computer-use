@@ -51,6 +51,15 @@ class Task:
         )
 
 
+CLEANUP_OWNED_LAUNCH_METHODS: set[str] = {
+    "appsfolder",
+    "start-menu",
+    "uri",
+    "app-paths",
+    "exe",
+}
+
+
 @dataclass
 class PlanState:
     """Minimal state representation for Lite Computer Use v2 Phase 2 orchestration."""
@@ -204,7 +213,8 @@ class PlanState:
 
         Criteria:
         - Must be completed task result with a verified hwnd.
-        - Must have reused_existing == False.
+        - Must have reused_existing == False explicitly.
+        - Must have app and launch_method in CLEANUP_OWNED_LAUNCH_METHODS.
         - Must not be in keep_hwnds or keep_apps (e.g. final result apps).
         - Returned in reverse order of task execution.
         """
@@ -218,7 +228,12 @@ class PlanState:
                 continue
             res = task.result
             hwnd = res.get("hwnd")
-            if not hwnd or res.get("reused_existing") is True:
+            if not hwnd or res.get("reused_existing") is not False:
+                continue
+            if not res.get("app"):
+                continue
+            launch_method = res.get("launch_method")
+            if not launch_method or launch_method not in CLEANUP_OWNED_LAUNCH_METHODS:
                 continue
             if hwnd in seen_hwnds or hwnd in keep_hwnds:
                 continue

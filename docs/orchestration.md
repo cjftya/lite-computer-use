@@ -373,7 +373,8 @@ Cleanup 종료 -> 최종 결과 보고
 
 ### Cleanup 실행 규칙
 1. **역순 종료**: 여러 앱을 실행한 경우 최근에 실행한 앱부터 역순으로 닫습니다.
-2. **Cleanup 실패 처리**:
+2. **종료 판정**: `close_window`는 대상 HWND가 실제로 파괴(`IsWindow == false`)되었을 때만 성공으로 판정합니다. 단순 hidden 또는 cloaked 상태는 성공으로 처리하지 않습니다.
+3. **Cleanup 실패 처리**:
    - Cleanup은 본 작업 결과를 뒤집지 않습니다.
    - 예: Main Goal 성공 후 Calculator 창 닫기 실패 시, 작업 자체는 성공으로 유지하고 cleanup warning만 기록합니다.
    - 창이 닫히지 않는다고 강제 프로세스 종료(`taskkill /F`, `os.kill`)를 호출하지 않습니다.
@@ -385,15 +386,16 @@ Cleanup 종료 -> 최종 결과 보고
 AI Orchestrator가 어떤 창을 닫고 어떤 창을 유지해야 하는지에 대한 엄격한 소유권 원칙입니다:
 
 ### 자동 종료 대상 (모두 충족 시에만)
-1. `open_app`으로 에이전트가 직접 실행함.
-2. `reused_existing == false` (기존 창이 아님).
-3. 해당 앱이 중간 작업용(temporary/intermediate)임.
-4. 사용자의 최종 결과물(final result)로 남길 필요가 없음.
+1. `open_app`으로 에이전트가 직접 실행함 (`launch_method`가 `appsfolder`, `start-menu`, `uri`, `app-paths`, `exe` 중 하나).
+2. `reused_existing == false` (명시적).
+3. `app`과 `launch_method` 정보가 존재하는 창.
+4. 해당 앱이 중간 작업용(temporary/intermediate)임.
+5. 사용자의 최종 결과물(final result)로 남길 필요가 없음.
 → `close_window --hwnd <hwnd>`
 
 ### 자동 종료 금지 (반드시 유지)
 1. **기존 사용자 앱**: `reused_existing == true`인 창은 절대 닫지 않습니다.
-2. **최종 결과 앱**: 예컨대 "계산기로 계산하고 결과를 메모장에 적어줘" 요청에서 메모장은 사용자가 확인해야 할 최종 결과이므로 닫지 않습니다.
-3. **기존 브라우저 창/탭**: 사용자가 열어둔 브라우저 인스턴스는 유지합니다.
-4. **소유권 불명확 창**: 에이전트가 직접 연 것이 확실하지 않은 HWND는 안전하게 유지합니다.
+2. **소유권 불명확 창**: `reused_existing` 필드가 누락되었거나 `focus_window` 등 타 도구 실행 결과로 남은 HWND는 절대 닫지 않습니다.
+3. **최종 결과 앱**: 예컨대 "계산기로 계산하고 결과를 메모장에 적어줘" 요청에서 메모장은 사용자가 확인해야 할 최종 결과이므로 닫지 않습니다.
+4. **기존 브라우저 창/탭**: 사용자가 열어둔 브라우저 인스턴스는 유지합니다.
 

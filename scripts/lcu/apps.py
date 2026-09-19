@@ -15,7 +15,7 @@ import yaml
 from .errors import LCUError
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
-APP_INDEX_CACHE_VERSION = 3
+APP_INDEX_CACHE_VERSION = 4
 APP_WINDOW_READY_TIMEOUT = 2.5
 APP_WINDOW_READY_INTERVAL = 0.1
 
@@ -80,6 +80,18 @@ def _is_packaged_app_command(command: str) -> bool:
 def normalize_app_name(name: str) -> str:
     # Lowercase and remove all whitespace and common punctuation
     return re.sub(r"[\s\-_.:/\\\(\)\[\]]", "", name.lower())
+
+
+def entry_match_keys(entry: AppEntry) -> set[str]:
+    keys = set()
+    norm_name = normalize_app_name(entry.name)
+    if norm_name:
+        keys.add(norm_name)
+    for a in entry.aliases:
+        norm_a = normalize_app_name(a)
+        if norm_a:
+            keys.add(norm_a)
+    return keys
 
 
 @dataclass
@@ -413,24 +425,44 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
     start_menu_apps = discover_start_menu_apps()
     app_paths_apps = discover_app_paths_apps()
 
-    combined: dict[str, AppEntry] = {}
+    indexed_entries: list[AppEntry] = []
+
     # Priority for metadata & candidates: config > start-menu > app-paths
-    for app in app_paths_apps:
-        combined[app.normalized] = app
-
-    for app in start_menu_apps:
-        if app.normalized in combined:
-            combined[app.normalized] = merge_app_entries(primary=app, secondary=combined[app.normalized])
-        else:
-            combined[app.normalized] = app
-
+    # 1. Config apps: canonical source
     for app in config_apps:
-        if app.normalized in combined:
-            combined[app.normalized] = merge_app_entries(primary=app, secondary=combined[app.normalized])
-        else:
-            combined[app.normalized] = app
+        indexed_entries.append(app)
 
-    result = list(combined.values())
+    # 2. Start menu apps: alias-aware merge with existing entries
+    for app in start_menu_apps:
+        app_keys = entry_match_keys(app)
+        matched_idx = None
+        for i, existing in enumerate(indexed_entries):
+            if entry_match_keys(existing) & app_keys:
+                matched_idx = i
+                break
+        if matched_idx is not None:
+            indexed_entries[matched_idx] = merge_app_entries(
+                primary=indexed_entries[matched_idx], secondary=app
+            )
+        else:
+            indexed_entries.append(app)
+
+    # 3. App paths apps: alias-aware merge with existing entries
+    for app in app_paths_apps:
+        app_keys = entry_match_keys(app)
+        matched_idx = None
+        for i, existing in enumerate(indexed_entries):
+            if entry_match_keys(existing) & app_keys:
+                matched_idx = i
+                break
+        if matched_idx is not None:
+            indexed_entries[matched_idx] = merge_app_entries(
+                primary=indexed_entries[matched_idx], secondary=app
+            )
+        else:
+            indexed_entries.append(app)
+
+    result = indexed_entries
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -620,12 +652,23 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                 time.sleep(APP_WINDOW_READY_INTERVAL)
 
         if detected_win is not None:
-            is_reused = detected_win.get("hwnd", 0) in before_hwnds
+            detected_hwnd = detected_win.get("hwnd", 0)
+            try:
+                from .windows import focus_window
+
+                focus_window(hwnd=detected_hwnd)
+            except Exception as exc:
+                raise LCUError(
+                    "window_focus_failed",
+                    f"Window with hwnd {detected_hwnd} detected for '{name}', but failed to focus: {exc}",
+                ) from exc
+
+            is_reused = detected_hwnd in before_hwnds
             successful_result = {
                 "app": entry.name,
                 "target": candidate.target,
                 "launch_method": candidate.method,
-                "hwnd": detected_win.get("hwnd", 0),
+                "hwnd": detected_hwnd,
                 "title": detected_win.get("title", entry.name),
                 "reused_existing": is_reused,
             }

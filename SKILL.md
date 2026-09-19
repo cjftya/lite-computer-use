@@ -18,7 +18,7 @@ py -3.13 scripts\lcu.py <tool> [args]
 ## 1. Tool 목록 (Public Tools)
 
 ### Open & Discovery
-- `open_app <name>`: Launch application with priority strategy (AppsFolder -> Start Menu -> URI -> App Paths -> direct exe) and verify visible window. Returns verified `hwnd`, `launch_method`, and `reused_existing`. Reuses and restores single existing window automatically.
+- `open_app <name>`: Launch application with priority strategy (AppsFolder -> Start Menu -> URI -> App Paths -> direct exe), verify visible window, and bring to foreground. Returns verified `hwnd`, `launch_method`, and `reused_existing`. Reuses and restores single existing window automatically.
 - `open_file <absolute-path>`: Open file with default associated application.
 - `open_folder <absolute-path-or-alias>`: Open folder in Explorer (`desktop`, `documents`, `downloads`, `바탕화면`, `문서`, `다운로드`).
 - `open_url <url>`: Open `http://` or `https://` URL in default browser.
@@ -28,7 +28,7 @@ py -3.13 scripts\lcu.py <tool> [args]
 ### Window Management
 - `list_windows [--query <query>]`: List visible top-level windows (`hwnd`, `title`, `process`, `active`, `bounds`).
 - `focus_window [query] [--hwnd <int>]`: Restore and bring window to foreground.
-- `close_window [query] [--hwnd <int>]`: Send standard WM_CLOSE and verify window destruction via polling (no force-kill).
+- `close_window [query] [--hwnd <int>]`: Send standard WM_CLOSE and verify actual HWND destruction via polling (no force-kill; hidden or cloaked status alone is not considered closed).
 - `set_window_bounds --x <int> --y <int> --width <int> --height <int> [--hwnd <int>]`: Resize and reposition window.
 
 ### Vision & Screenshot
@@ -81,7 +81,7 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 1. **Direct Tool** (`open_app`, `open_file`, `open_folder`, `open_url`): GUI 클릭/탐색 대신 항상 최우선 사용.
 2. **Discovery Tool** (`find_path`, `list_windows`, `focus_window`): 경로 및 창 식별에 우선 사용.
 3. **GUI Vision** (`screenshot` -> `batch`): Direct/Discovery로 해결할 수 없을 때만 최후에 사용.
-- **Direct Tool 성공 정의**: `open_app`은 단순 dispatch 성공이 아니라 검증된 `hwnd`(`MainWindowHandle`)가 확보되어야 Task 완료로 판정합니다. 단일 기존 창이 존재하면 자동 restore/focus 후 `reused_existing=true`로 완료합니다.
+- **Direct Tool 성공 정의**: `open_app`은 단순 dispatch 성공이 아니라 검증된 `hwnd`(`MainWindowHandle`) 확보 및 foreground 포커스가 검증되어야 Task 완료로 판정합니다. 단일 기존 창이 존재하면 자동 restore/focus 후 `reused_existing=true`로 완료합니다.
 
 ### 2.3 Observation Boundary & Batching
 - **핵심 불변 규칙**:
@@ -108,15 +108,16 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 - **전체 흐름**:
   Goal completed -> Cleanup Phase -> Task result에서 새로 열린 temporary app 확인 -> `close_window --hwnd <hwnd>` (역순 실행) -> Cleanup 종료
 - **자동 종료 대상 (모두 충족 시)**:
-  1. `open_app`으로 생성됨
-  2. `reused_existing == false`
-  3. 해당 앱이 중간 작업용 (intermediate task)
-  4. 사용자의 최종 결과물(final result)로 남길 필요가 없음
+  1. `open_app`으로 생성됨 (`launch_method`가 `appsfolder`, `start-menu`, `uri`, `app-paths`, `exe` 중 하나)
+  2. `reused_existing == false` (명시적)
+  3. `app`과 `launch_method` 정보가 유효함
+  4. 해당 앱이 중간 작업용 (intermediate task)
+  5. 사용자의 최종 결과물(final result)로 남길 필요가 없음
 - **자동 종료 금지**:
   1. `reused_existing == true` (사용자가 원래 열어둔 창/앱)
-  2. 사용자의 최종 결과로 남겨야 하는 창 (예: "메모장에 결과를 적어줘" 요청의 메모장)
-  3. 기존 브라우저 창 또는 탭
-  4. 소유권이 불명확한 창
+  2. `reused_existing` 필드가 누락되었거나 `focus_window` 결과 등 소유권이 불명확한 창
+  3. 사용자의 최종 결과로 남겨야 하는 창 (예: "메모장에 결과를 적어줘" 요청의 메모장)
+  4. 기존 브라우저 창 또는 탭
 - **종료 순서**:
   여러 앱을 실행한 경우 최근에 실행한 앱부터 **역순**으로 닫습니다.
 - **Cleanup 실패 처리**:

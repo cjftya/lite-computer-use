@@ -18,6 +18,7 @@ from scripts.lcu.apps import (
     build_app_index,
     classify_launch_method,
     find_app_entry,
+    normalize_app_name,
     open_app,
 )
 from scripts.lcu.direct import (
@@ -240,7 +241,8 @@ def test_open_app_appsfolder_success() -> None:
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("os.startfile") as mock_start, \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]):
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 3345694, "title": "Paint"}) as mock_focus:
         res = open_app("paint")
         assert res["app"] == "Paint"
         assert res["target"] == appsfolder_cmd
@@ -248,6 +250,7 @@ def test_open_app_appsfolder_success() -> None:
         assert res["hwnd"] == 3345694
         assert res["title"] == "Paint"
         assert res["reused_existing"] is False
+        mock_focus.assert_called_once_with(hwnd=3345694)
         # Only AppsFolder was dispatched, mspaint.exe was NOT executed
         mock_start.assert_called_once_with(appsfolder_cmd)
 
@@ -278,6 +281,7 @@ def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
          patch("os.name", "nt"), \
          patch("os.startfile") as mock_start, \
          patch("scripts.lcu.windows.list_windows", side_effect=mock_list), \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 556677, "title": "Paint"}) as mock_focus, \
          patch("time.sleep"):
         res = open_app("paint")
         assert res["app"] == "Paint"
@@ -285,6 +289,7 @@ def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
         assert res["launch_method"] == "exe"
         assert res["hwnd"] == 556677
         assert res["reused_existing"] is False
+        mock_focus.assert_called_once_with(hwnd=556677)
         assert mock_start.call_count == 2
         mock_start.assert_any_call(appsfolder_cmd)
         mock_start.assert_any_call("mspaint.exe")
@@ -380,12 +385,12 @@ def test_open_app_multiple_existing_windows_no_arbitrary_focus() -> None:
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("os.startfile") as mock_start, \
-         patch("scripts.lcu.windows.focus_window") as mock_focus, \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 103, "title": "Chrome Window 3"}) as mock_focus, \
          patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins):
         res = open_app("chrome")
-        # Should not have called focus_window prior to launching
-        mock_focus.assert_not_called()
+        # Should not have called focus_window prior to launching, but calls focus_window after detecting win3 (hwnd 103)
         mock_start.assert_called_once_with("chrome.exe")
+        mock_focus.assert_called_once_with(hwnd=103)
         assert res["hwnd"] == 103
         assert res["reused_existing"] is False
         assert res["launch_method"] == "exe"
@@ -399,7 +404,8 @@ def test_open_app_response_fields() -> None:
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("os.startfile"), \
-         patch("scripts.lcu.windows.list_windows", return_value=[mock_win]):
+         patch("scripts.lcu.windows.list_windows", return_value=[mock_win]), \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 1234, "title": "Untitled - Notepad"}):
         res = open_app("notepad")
         assert "app" in res
         assert "target" in res
@@ -487,3 +493,204 @@ def test_build_app_index_cache_version_invalidation(tmp_path: Path) -> None:
         written = json.loads(cache_file.read_text(encoding="utf-8"))
         assert written.get("version") == APP_INDEX_CACHE_VERSION
         assert "commands" in written["apps"][0]
+
+
+# ============================================================================
+# Hardening C — App Index Alias Merge Tests (C1 - C4)
+# ============================================================================
+
+def test_alias_merge_vscode_start_menu() -> None:
+    """Test C1: VS Code config entry + Start Menu entry alias merge into one entry with .lnk candidate"""
+    config_entry = AppEntry(
+        name="vscode",
+        target="code.exe",
+        source="config",
+        aliases=["vscode", "visual studio code", "vs code"],
+        normalized="vscode",
+        commands=["code.exe", "code.cmd"],
+    )
+    start_menu_entry = AppEntry(
+        name="Visual Studio Code",
+        target=r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Visual Studio Code.lnk",
+        source="start-menu",
+        aliases=["Visual Studio Code"],
+        normalized="visualstudiocode",
+    )
+
+    with patch("scripts.lcu.apps.get_cache_file_path", return_value=Path(tempfile.gettempdir()) / "nonexistent_cache.json"), \
+         patch("scripts.lcu.apps.load_config_apps", return_value=[config_entry]), \
+         patch("scripts.lcu.apps.discover_start_menu_apps", return_value=[start_menu_entry]), \
+         patch("scripts.lcu.apps.discover_app_paths_apps", return_value=[]):
+        index = build_app_index(force_refresh=True)
+
+    assert len(index) == 1
+    merged = index[0]
+    assert merged.name == "vscode"
+    assert "visualstudiocode" in [normalize_app_name(a) for a in merged.aliases]
+    # Candidate priority: start-menu (.lnk) priority 2 comes before exe priority 5
+    assert merged.candidates[0].method == "start-menu"
+    assert merged.candidates[0].target == start_menu_entry.target
+
+
+def test_alias_merge_chrome_start_menu() -> None:
+    """Test C2: Chrome config alias 'google chrome' merges with Start Menu 'Google Chrome'"""
+    config_entry = AppEntry(
+        name="chrome",
+        target="chrome.exe",
+        source="config",
+        aliases=["chrome", "google chrome"],
+        normalized="chrome",
+        commands=["chrome.exe"],
+    )
+    start_menu_entry = AppEntry(
+        name="Google Chrome",
+        target=r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Google Chrome.lnk",
+        source="start-menu",
+        aliases=["Google Chrome"],
+        normalized="googlechrome",
+    )
+
+    with patch("scripts.lcu.apps.get_cache_file_path", return_value=Path(tempfile.gettempdir()) / "nonexistent_cache.json"), \
+         patch("scripts.lcu.apps.load_config_apps", return_value=[config_entry]), \
+         patch("scripts.lcu.apps.discover_start_menu_apps", return_value=[start_menu_entry]), \
+         patch("scripts.lcu.apps.discover_app_paths_apps", return_value=[]):
+        index = build_app_index(force_refresh=True)
+
+    assert len(index) == 1
+    assert index[0].name == "chrome"
+    assert index[0].candidates[0].method == "start-menu"
+
+
+def test_alias_merge_unrelated_apps_remain_distinct() -> None:
+    """Test C3: Unrelated apps without exact alias match do NOT merge"""
+    entry1 = AppEntry(
+        name="vscode",
+        target="code.exe",
+        source="config",
+        aliases=["vscode", "visual studio code"],
+        normalized="vscode",
+    )
+    entry2 = AppEntry(
+        name="Code Writer",
+        target=r"C:\Program Files\CodeWriter\writer.exe",
+        source="start-menu",
+        aliases=["Code Writer"],
+        normalized="codewriter",
+    )
+
+    with patch("scripts.lcu.apps.get_cache_file_path", return_value=Path(tempfile.gettempdir()) / "nonexistent_cache.json"), \
+         patch("scripts.lcu.apps.load_config_apps", return_value=[entry1]), \
+         patch("scripts.lcu.apps.discover_start_menu_apps", return_value=[entry2]), \
+         patch("scripts.lcu.apps.discover_app_paths_apps", return_value=[]):
+        index = build_app_index(force_refresh=True)
+
+    assert len(index) == 2
+    names = {e.name for e in index}
+    assert names == {"vscode", "Code Writer"}
+
+
+def test_alias_merge_prevents_ambiguity_regression() -> None:
+    """Test C4: Query 'visual studio code' against merged index returns single entry without ambiguous_target"""
+    config_entry = AppEntry(
+        name="vscode",
+        target="code.exe",
+        source="config",
+        aliases=["vscode", "visual studio code", "vs code"],
+        normalized="vscode",
+    )
+    start_menu_entry = AppEntry(
+        name="Visual Studio Code",
+        target=r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Visual Studio Code.lnk",
+        source="start-menu",
+        aliases=["Visual Studio Code"],
+        normalized="visualstudiocode",
+    )
+
+    with patch("scripts.lcu.apps.get_cache_file_path", return_value=Path(tempfile.gettempdir()) / "nonexistent_cache.json"), \
+         patch("scripts.lcu.apps.load_config_apps", return_value=[config_entry]), \
+         patch("scripts.lcu.apps.discover_start_menu_apps", return_value=[start_menu_entry]), \
+         patch("scripts.lcu.apps.discover_app_paths_apps", return_value=[]):
+        index = build_app_index(force_refresh=True)
+
+    entry, candidates = find_app_entry("visual studio code", index)
+    assert entry is not None
+    assert entry.name == "vscode"
+    assert candidates == []
+
+
+# ============================================================================
+# Hardening D — Foreground Focus Tests (D1 - D3)
+# ============================================================================
+
+def test_open_app_new_window_focus_success() -> None:
+    """Test D1: 새 창 visible + focus 성공 -> focus_window(hwnd) 호출 및 open_app success"""
+    entry = AppEntry(
+        name="Paint",
+        target="mspaint.exe",
+        source="config",
+        aliases=["paint"],
+        normalized="paint",
+        commands=["mspaint.exe"],
+    )
+    mock_win = {"hwnd": 888111, "title": "Paint", "process": "mspaint.exe", "active": True}
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile"), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 888111, "title": "Paint"}) as mock_focus:
+        res = open_app("paint")
+        assert res["hwnd"] == 888111
+        assert res["reused_existing"] is False
+        mock_focus.assert_called_once_with(hwnd=888111)
+
+
+def test_open_app_new_window_focus_failure_aborts_without_extra_candidates() -> None:
+    """Test D2: 새 창 visible + focus 실패 -> 성공 반환 금지, 추가 candidate 실행 금지, window_focus_failed 반환"""
+    entry = AppEntry(
+        name="MultiCandidateApp",
+        target="primary.exe",
+        source="config",
+        aliases=["multiapp"],
+        normalized="multicandidateapp",
+        commands=["primary.exe", "secondary.exe"],
+    )
+    mock_win = {"hwnd": 888222, "title": "App", "process": "primary.exe", "active": True}
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.windows.focus_window", side_effect=LCUError("window_focus_failed", "Cannot focus window")):
+        with pytest.raises(LCUError) as exc_info:
+            open_app("multiapp")
+        assert exc_info.value.code == "window_focus_failed"
+        assert "failed to focus" in exc_info.value.message
+        # Crucial check: only primary.exe was started, secondary.exe was NOT started
+        mock_start.assert_called_once_with("primary.exe")
+
+
+def test_open_app_single_existing_window_reused_d3() -> None:
+    """Test D3: 기존 단일 창 존재 -> focus_window -> reused_existing=True 유지"""
+    entry = AppEntry(
+        name="Chrome",
+        target="chrome.exe",
+        source="config",
+        aliases=["chrome"],
+        normalized="chrome",
+        commands=["chrome.exe"],
+    )
+    existing_win = {"hwnd": 888333, "title": "Google Chrome", "process": "chrome.exe", "active": False}
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", return_value=[existing_win]), \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 888333, "title": "Google Chrome"}) as mock_focus:
+        res = open_app("chrome")
+        assert res["hwnd"] == 888333
+        assert res["reused_existing"] is True
+        assert res["launch_method"] == "existing-window"
+        mock_focus.assert_called_once_with(hwnd=888333)
+        mock_start.assert_not_called()
+

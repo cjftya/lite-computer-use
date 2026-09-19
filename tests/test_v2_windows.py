@@ -214,3 +214,31 @@ def test_close_window_no_force_kill() -> None:
         mock_run.assert_not_called()
         mock_os_kill.assert_not_called()
 
+
+def test_close_window_hidden_only_fails() -> None:
+    """Test B2: IsWindow=true, IsWindowVisible=false 상태만으로 성공 처리 금지 -> window_close_failed"""
+    target = {"hwnd": 100, "title": "Hidden Window", "process": "app.exe"}
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("win32gui.PostMessage"), \
+         patch("win32gui.IsWindow", return_value=1), \
+         patch("win32gui.IsWindowVisible", return_value=0), \
+         patch("time.sleep"), \
+         patch("os.name", "nt"):
+        with pytest.raises(LCUError) as exc_info:
+            close_window(hwnd=100, timeout=0.1, interval=0.05)
+        assert exc_info.value.code == "window_close_failed"
+
+
+def test_close_window_cloaked_only_fails() -> None:
+    """Test B3: IsWindow=true, DWM cloaked=true 상태만으로 성공 처리 금지 -> window_close_failed"""
+    target = {"hwnd": 100, "title": "Cloaked Window", "process": "app.exe"}
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("win32gui.PostMessage"), \
+         patch("win32gui.IsWindow", return_value=1), \
+         patch("time.sleep"), \
+         patch("os.name", "nt"):
+        with pytest.raises(LCUError) as exc_info:
+            close_window(hwnd=100, timeout=0.1, interval=0.05)
+        assert exc_info.value.code == "window_close_failed"
+
+

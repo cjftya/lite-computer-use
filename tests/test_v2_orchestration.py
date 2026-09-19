@@ -569,3 +569,42 @@ def test_scenario_d_cleanup_failure_does_not_fail_main_goal() -> None:
     assert len(cleanup_warnings) == 1
     assert "Cleanup warning for hwnd 9999" in cleanup_warnings[0]
 
+
+def test_cleanup_ownership_hardening() -> None:
+    """Hardening A: PlanState.get_cleanup_targets() ownership validation tests (A1 - A5)"""
+    plan = create_plan(
+        goal="Cleanup ownership validation",
+        tasks=[
+            {"id": 1, "goal": "T1", "done_when": "D1"},
+            {"id": 2, "goal": "T2", "done_when": "D2"},
+            {"id": 3, "goal": "T3", "done_when": "D3"},
+            {"id": 4, "goal": "T4", "done_when": "D4"},
+            {"id": 5, "goal": "T5", "done_when": "D5"},
+        ],
+    )
+    # Test A1: open_app new window -> included
+    r1 = {"app": "Paint", "hwnd": 1001, "launch_method": "appsfolder", "reused_existing": False}
+    plan.complete_current_task(result=r1)
+
+    # Test A2: existing-window -> excluded
+    r2 = {"app": "Chrome", "hwnd": 1002, "launch_method": "existing-window", "reused_existing": True}
+    plan.complete_current_task(result=r2)
+
+    # Test A3: reused_existing missing -> excluded
+    r3 = {"hwnd": 1003, "title": "Existing Notepad"}
+    plan.complete_current_task(result=r3)
+
+    # Test A4: focus_window style result without app/launch_method -> excluded
+    r4 = {"hwnd": 1004, "title": "Chrome"}
+    plan.complete_current_task(result=r4)
+
+    # Test A5: launch_method invalid -> excluded
+    r5 = {"app": "Unknown", "hwnd": 1005, "launch_method": "manual-focus", "reused_existing": False}
+    plan.complete_current_task(result=r5)
+
+    targets = plan.get_cleanup_targets()
+    assert len(targets) == 1
+    assert targets[0]["hwnd"] == 1001
+    assert targets[0]["app"] == "Paint"
+
+
