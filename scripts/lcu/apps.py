@@ -15,13 +15,221 @@ import yaml
 from .errors import LCUError
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
-APP_INDEX_CACHE_VERSION = 2
-APP_WINDOW_READY_TIMEOUT = 1.5
+APP_INDEX_CACHE_VERSION = 3
+APP_WINDOW_READY_TIMEOUT = 2.5
 APP_WINDOW_READY_INTERVAL = 0.1
+
+CANDIDATE_PRIORITY: dict[str, int] = {
+    "appsfolder": 1,
+    "start-menu": 2,
+    "uri": 3,
+    "app-paths": 4,
+    "exe": 5,
+}
+
+
+@dataclass
+class LaunchCandidate:
+    target: str
+    method: str  # "appsfolder", "start-menu", "uri", "app-paths", "exe"
+    source: str  # "config", "start-menu", "app-paths"
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> LaunchCandidate:
+        return cls(
+            target=str(d.get("target", "")),
+            method=str(d.get("method", "exe")),
+            source=str(d.get("source", "")),
+        )
+
+
+def candidate_priority_key(candidate: LaunchCandidate) -> int:
+    return CANDIDATE_PRIORITY.get(candidate.method, 99)
+
+
+def classify_launch_method(target: str, source: str = "") -> str:
+    t_trim = target.strip()
+    t_lower = t_trim.lower()
+
+    if t_lower.startswith("shell:appsfolder\\"):
+        return "appsfolder"
+    if t_lower.endswith(".lnk"):
+        return "start-menu"
+
+    # URI check: scheme followed by colon, not a Windows drive letter path like C:\
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\\)", t_trim) and not (
+        len(t_trim) > 1 and t_trim[1] == ":"
+    ):
+        return "uri"
+
+    if source == "app-paths":
+        return "app-paths"
+    if t_lower.endswith(".exe") or t_lower.endswith(".cmd") or t_lower.endswith(".bat"):
+        return "app-paths" if source == "app-paths" else "exe"
+
+    return "exe"
 
 
 def _is_packaged_app_command(command: str) -> bool:
     return command.strip().lower().startswith("shell:appsfolder\\")
+
+
+def normalize_app_name(name: str) -> str:
+    # Lowercase and remove all whitespace and common punctuation
+    return re.sub(r"[\s\-_.:/\\\(\)\[\]]", "", name.lower())
+
+
+@dataclass
+class AppEntry:
+    name: str
+    target: str
+    source: str  # "config", "start-menu", "app-paths"
+    aliases: list[str]
+    normalized: str
+    commands: list[str] = field(default_factory=list)
+    candidates: list[LaunchCandidate] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.commands:
+            self.commands = [self.target]
+        if not self.candidates:
+            self.candidates = [
+                LaunchCandidate(
+                    target=cmd,
+                    method=classify_launch_method(cmd, self.source),
+                    source=self.source,
+                )
+                for cmd in self.commands
+            ]
+        self.sort_and_deduplicate_candidates()
+
+    def sort_and_deduplicate_candidates(self) -> None:
+        seen_targets: set[str] = set()
+        unique_candidates: list[LaunchCandidate] = []
+
+        sorted_cands = sorted(self.candidates, key=candidate_priority_key)
+        for cand in sorted_cands:
+            norm_target = cand.target.strip().lower()
+            if norm_target not in seen_targets:
+                seen_targets.add(norm_target)
+                unique_candidates.append(cand)
+
+        self.candidates = unique_candidates
+        if unique_candidates:
+            self.commands = [c.target for c in unique_candidates]
+            self.target = unique_candidates[0].target
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "target": self.target,
+            "source": self.source,
+            "aliases": self.aliases,
+            "normalized": self.normalized,
+            "commands": self.commands,
+            "candidates": [c.to_dict() for c in self.candidates],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> AppEntry:
+        raw_candidates = d.get("candidates", [])
+        if raw_candidates:
+            candidates = [LaunchCandidate.from_dict(c) for c in raw_candidates]
+        else:
+            commands = d.get("commands", [d["target"]])
+            source = d.get("source", "")
+            candidates = [
+                LaunchCandidate(
+                    target=c,
+                    method=classify_launch_method(c, source),
+                    source=source,
+                )
+                for c in commands
+            ]
+        return cls(
+            name=d["name"],
+            target=d["target"],
+            source=d["source"],
+            aliases=d.get("aliases", []),
+            normalized=d.get("normalized", normalize_app_name(d["name"])),
+            commands=d.get("commands", [d["target"]]),
+            candidates=candidates,
+        )
+
+
+def merge_app_entries(primary: AppEntry, secondary: AppEntry) -> AppEntry:
+    # Primary provides the canonical name, normalized, and primary source
+    merged_aliases = list(dict.fromkeys(primary.aliases + secondary.aliases))
+    merged_candidates = list(primary.candidates) + list(secondary.candidates)
+    return AppEntry(
+        name=primary.name,
+        target=primary.target,
+        source=primary.source,
+        aliases=merged_aliases,
+        normalized=primary.normalized,
+        candidates=merged_candidates,
+    )
+
+
+def is_matching_window(win: dict[str, Any], entry: AppEntry) -> bool:
+    title = win.get("title", "").strip().lower()
+    proc = win.get("process", "").strip().lower()
+
+    known_exes = set()
+    for cand in entry.candidates:
+        t = cand.target.strip().lower()
+        if t.endswith(".exe"):
+            known_exes.add(Path(t).name.lower())
+    if not known_exes:
+        known_exes.add(f"{entry.normalized}.exe")
+        known_exes.add(f"{entry.name.lower()}.exe")
+
+    # 1. Process matching
+    if proc and proc in known_exes:
+        return True
+
+    # 2. Title matching
+    queries = [entry.name.lower()] + [a.lower() for a in entry.aliases]
+    valid_queries = [q for q in queries if len(q) >= 2]
+
+    for q in valid_queries:
+        if q == title or (len(q) >= 3 and q in title):
+            # Ignore common development tools matching title unless the entry itself is that tool
+            if entry.normalized not in (
+                "explorer",
+                "visualstudiocode",
+                "code",
+                "cmd",
+                "powershell",
+                "windowsterminal",
+            ) and proc in (
+                "code.exe",
+                "explorer.exe",
+                "windowsterminal.exe",
+                "cmd.exe",
+                "powershell.exe",
+            ):
+                continue
+            return True
+
+    return False
+
+
+def find_matching_windows(
+    entry: AppEntry, windows_list: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    if windows_list is None:
+        try:
+            from .windows import list_windows
+
+            windows_list = list_windows()
+        except Exception:
+            return []
+
+    return [w for w in windows_list if is_matching_window(w, entry)]
 
 
 def _wait_for_visible_app_window(
@@ -42,13 +250,9 @@ def _wait_for_visible_app_window(
 
     while checks < max_checks:
         try:
-            wins = list_windows(query=entry.name)
-            if not wins:
-                for alias in entry.aliases:
-                    wins = list_windows(query=alias)
-                    if wins:
-                        break
-            if wins:
+            wins = list_windows()
+            matching = [w for w in wins if is_matching_window(w, entry)]
+            if matching:
                 return True
         except Exception:
             pass
@@ -59,39 +263,6 @@ def _wait_for_visible_app_window(
         if interval > 0:
             time.sleep(interval)
     return False
-
-
-def normalize_app_name(name: str) -> str:
-    # Lowercase and remove all whitespace and common punctuation
-    return re.sub(r"[\s\-_.:/\\\(\)\[\]]", "", name.lower())
-
-
-@dataclass
-class AppEntry:
-    name: str
-    target: str
-    source: str  # "config", "start-menu", "app-paths"
-    aliases: list[str]
-    normalized: str
-    commands: list[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        if not self.commands:
-            self.commands = [self.target]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> AppEntry:
-        return cls(
-            name=d["name"],
-            target=d["target"],
-            source=d["source"],
-            aliases=d.get("aliases", []),
-            normalized=d.get("normalized", normalize_app_name(d["name"])),
-            commands=d.get("commands", [d["target"]]),
-        )
 
 
 def get_cache_file_path() -> Path:
@@ -243,13 +414,21 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
     app_paths_apps = discover_app_paths_apps()
 
     combined: dict[str, AppEntry] = {}
-    # Priority: config > start-menu > app-paths
+    # Priority for metadata & candidates: config > start-menu > app-paths
     for app in app_paths_apps:
         combined[app.normalized] = app
+
     for app in start_menu_apps:
-        combined[app.normalized] = app
+        if app.normalized in combined:
+            combined[app.normalized] = merge_app_entries(primary=app, secondary=combined[app.normalized])
+        else:
+            combined[app.normalized] = app
+
     for app in config_apps:
-        combined[app.normalized] = app
+        if app.normalized in combined:
+            combined[app.normalized] = merge_app_entries(primary=app, secondary=combined[app.normalized])
+        else:
+            combined[app.normalized] = app
 
     result = list(combined.values())
     try:
@@ -333,39 +512,139 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
     if entry is None:
         raise LCUError("not_found", f"No application found matching '{name}'")
 
-    commands_to_try = getattr(entry, "commands", None) or [entry.target]
-    last_exc: Exception | None = None
-    successful_target: str | None = None
+    # Phase 6: Pre-check for existing window
+    try:
+        from .windows import focus_window, list_windows
 
-    for idx, target in enumerate(commands_to_try):
+        existing_windows = find_matching_windows(entry)
+    except Exception:
+        existing_windows = []
+
+    # Single existing window -> restore/focus and reuse
+    if len(existing_windows) == 1:
+        target_win = existing_windows[0]
+        try:
+            focus_window(hwnd=target_win.get("hwnd"))
+            return {
+                "app": entry.name,
+                "target": None,
+                "launch_method": "existing-window",
+                "hwnd": target_win.get("hwnd", 0),
+                "title": target_win.get("title", entry.name),
+                "reused_existing": True,
+            }
+        except Exception:
+            # If focusing existing window fails (e.g. was closing), proceed to fresh launch
+            pass
+
+    # Snapshot window handles before launch
+    try:
+        all_before = list_windows()
+        before_hwnds = {w.get("hwnd", 0) for w in all_before}
+    except Exception:
+        all_before = []
+        before_hwnds = set()
+
+    attempts: list[dict[str, Any]] = []
+    successful_result: dict[str, Any] | None = None
+
+    for candidate in entry.candidates:
         try:
             if os.name == "nt":
-                os.startfile(target)
+                os.startfile(candidate.target)
             else:
-                subprocess.Popen(target, shell=True)
+                subprocess.Popen(candidate.target, shell=True)
         except Exception as exc:
-            last_exc = exc
+            attempts.append(
+                {
+                    "method": candidate.method,
+                    "target": candidate.target,
+                    "result": f"dispatch_error: {exc}",
+                }
+            )
             continue
 
-        is_packaged = _is_packaged_app_command(target)
-        has_subsequent_packaged = any(_is_packaged_app_command(c) for c in commands_to_try[idx + 1:])
+        # Polling for visible window
+        t_end = time.time() + APP_WINDOW_READY_TIMEOUT
+        max_checks = (
+            max(1, int(round(APP_WINDOW_READY_TIMEOUT / APP_WINDOW_READY_INTERVAL)) + 1)
+            if APP_WINDOW_READY_INTERVAL > 0
+            else 1
+        )
+        checks = 0
+        detected_win: dict[str, Any] | None = None
 
-        # Verify visible UI window if a packaged app fallback candidate follows, or for the packaged fallback itself
-        if os.name == "nt" and (has_subsequent_packaged or (is_packaged and idx > 0)):
-            if _wait_for_visible_app_window(entry):
-                successful_target = target
+        while checks < max_checks:
+            try:
+                current_windows = list_windows()
+
+                # 1. Check for newly created window matching entry
+                new_matching = [
+                    w
+                    for w in current_windows
+                    if w.get("hwnd", 0) not in before_hwnds and is_matching_window(w, entry)
+                ]
+                if len(new_matching) == 1:
+                    detected_win = new_matching[0]
+                    break
+                elif len(new_matching) > 1:
+                    active_new = next((w for w in new_matching if w.get("active")), new_matching[0])
+                    detected_win = active_new
+                    break
+
+                # 2. Check if an existing matching window became active/foreground
+                active_matching = next(
+                    (
+                        w
+                        for w in current_windows
+                        if w.get("active") and is_matching_window(w, entry)
+                    ),
+                    None,
+                )
+                if active_matching:
+                    detected_win = active_matching
+                    break
+
+                # 3. If before_hwnds had no matching windows, any matching window counts
+                matching_all = [w for w in current_windows if is_matching_window(w, entry)]
+                if matching_all and not any(w.get("hwnd", 0) in before_hwnds for w in matching_all):
+                    detected_win = matching_all[0]
+                    break
+            except Exception:
+                pass
+
+            checks += 1
+            if time.time() >= t_end or checks >= max_checks:
                 break
-            else:
-                last_exc = RuntimeError(f"No visible window found for '{target}' within timeout")
-                continue
+            if APP_WINDOW_READY_INTERVAL > 0:
+                time.sleep(APP_WINDOW_READY_INTERVAL)
 
-        successful_target = target
-        break
+        if detected_win is not None:
+            is_reused = detected_win.get("hwnd", 0) in before_hwnds
+            successful_result = {
+                "app": entry.name,
+                "target": candidate.target,
+                "launch_method": candidate.method,
+                "hwnd": detected_win.get("hwnd", 0),
+                "title": detected_win.get("title", entry.name),
+                "reused_existing": is_reused,
+            }
+            break
+        else:
+            attempts.append(
+                {
+                    "method": candidate.method,
+                    "target": candidate.target,
+                    "result": "no_visible_window",
+                }
+            )
 
-    if successful_target is None:
+    if successful_result is None:
         raise LCUError(
             "dispatch_failed",
-            f"Failed to launch application '{name}' ({entry.target}): {last_exc}",
-        ) from last_exc
+            f"Failed to launch application '{name}' ({entry.target}): no visible window found",
+            attempts=attempts,
+            candidates=[c.target for c in entry.candidates],
+        )
 
-    return {"app": entry.name, "target": successful_target}
+    return successful_result

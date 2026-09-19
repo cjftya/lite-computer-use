@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import patch
 import pytest
 
+from scripts.lcu.errors import LCUError
 from scripts.lcu.state import (
     PlanState,
     Task,
@@ -457,3 +459,113 @@ def test_scenario_8_ambiguous_target_resolution() -> None:
     # No clear deterministic candidate -> cannot recover safely -> immediate abort
     assert plan_b.tasks[0].status == "failed"
     assert plan_b.recovery_used is False  # Aborted without blind recovery attempt
+
+
+# ============================================================================
+# 5. App Ownership & Cleanup Tests (Phase 16 / Section 22)
+# ============================================================================
+
+def test_scenario_a_temporary_and_final_result_cleanup() -> None:
+    """Scenario A: 계산기로 계산하고 메모장에 결과를 적어줘
+    Calculator: reused_existing=false, temporary=true
+    Notepad: reused_existing=false, final_result=true
+    완료: Calculator close, Notepad 유지
+    """
+    plan = create_plan(
+        goal="계산기로 계산하고 메모장에 결과를 적어줘",
+        tasks=[
+            {"id": 1, "goal": "계산기 열기", "done_when": "계산기 열림"},
+            {"id": 2, "goal": "계산 수행", "done_when": "계산 완료"},
+            {"id": 3, "goal": "메모장 열기", "done_when": "메모장 열림"},
+            {"id": 4, "goal": "결과 입력", "done_when": "결과 작성됨"},
+        ],
+    )
+    # Task 1: Open Calculator (temporary app)
+    calc_res = {"app": "Calculator", "hwnd": 1111, "reused_existing": False, "launch_method": "appsfolder"}
+    plan.complete_current_task(result=calc_res)
+
+    # Task 2: Calculate
+    plan.complete_current_task(result={"calc_output": 42})
+
+    # Task 3: Open Notepad (Final result app)
+    notepad_res = {"app": "Notepad", "hwnd": 2222, "reused_existing": False, "launch_method": "appsfolder"}
+    plan.complete_current_task(result=notepad_res)
+
+    # Task 4: Write Result
+    plan.complete_current_task(result={"written": True})
+
+    # Orchestrator cleanup phase: keep Notepad (final result), close Calculator
+    targets = plan.get_cleanup_targets(keep_apps={"notepad"})
+    assert len(targets) == 1
+    assert targets[0]["app"] == "Calculator"
+    assert targets[0]["hwnd"] == 1111
+
+
+def test_scenario_b_reused_chrome_preserved() -> None:
+    """Scenario B: 기존 Chrome 재사용 (reused_existing=True) -> Chrome close 금지"""
+    plan = create_plan(
+        goal="크롬에서 정보 확인",
+        tasks=[
+            {"id": 1, "goal": "크롬 활성화", "done_when": "크롬 창 활성화"},
+            {"id": 2, "goal": "정보 확인", "done_when": "확인 완료"},
+        ],
+    )
+    chrome_res = {"app": "Chrome", "hwnd": 4852350, "reused_existing": True, "launch_method": "existing-window"}
+    plan.complete_current_task(result=chrome_res)
+    plan.complete_current_task(result={"data": "found"})
+
+    targets = plan.get_cleanup_targets()
+    # Chrome must NOT be cleaned up because reused_existing is True
+    assert len(targets) == 0
+
+
+def test_scenario_c_reused_notepad_preserved() -> None:
+    """Scenario C: 기존 Notepad 재사용 (reused_existing=True) -> Notepad close 금지"""
+    plan = create_plan(
+        goal="메모장에 메모 추가",
+        tasks=[
+            {"id": 1, "goal": "메모장 활성화", "done_when": "메모장 활성화"},
+            {"id": 2, "goal": "메모 추가", "done_when": "작성 완료"},
+        ],
+    )
+    notepad_res = {"app": "Notepad", "hwnd": 3333, "reused_existing": True, "launch_method": "existing-window"}
+    plan.complete_current_task(result=notepad_res)
+    plan.complete_current_task(result={"appended": True})
+
+    targets = plan.get_cleanup_targets()
+    # Notepad must NOT be cleaned up because reused_existing is True
+    assert len(targets) == 0
+
+
+def test_scenario_d_cleanup_failure_does_not_fail_main_goal() -> None:
+    """Scenario D: cleanup 실패 시 main result는 success로 유지되고 cleanup warning 기록"""
+    plan = create_plan(
+        goal="작업 수행 후 임시 창 정리",
+        tasks=[
+            {"id": 1, "goal": "임시 앱 실행", "done_when": "앱 열림"},
+            {"id": 2, "goal": "작업 완료", "done_when": "완료"},
+        ],
+    )
+    temp_res = {"app": "TempApp", "hwnd": 9999, "reused_existing": False, "launch_method": "exe"}
+    plan.complete_current_task(result=temp_res)
+    plan.complete_current_task(result={"done": True})
+
+    targets = plan.get_cleanup_targets()
+    assert len(targets) == 1
+    assert targets[0]["hwnd"] == 9999
+
+    # Cleanup execution simulation
+    cleanup_warnings = []
+    with patch("scripts.lcu.windows.close_window", side_effect=LCUError("window_close_failed", "Stubborn window")):
+        for target in targets:
+            try:
+                from scripts.lcu.windows import close_window
+                close_window(hwnd=target["hwnd"])
+            except Exception as exc:
+                cleanup_warnings.append(f"Cleanup warning for hwnd {target['hwnd']}: {exc}")
+
+    # Main goal remains completed!
+    assert all(t.status == "completed" for t in plan.tasks)
+    assert len(cleanup_warnings) == 1
+    assert "Cleanup warning for hwnd 9999" in cleanup_warnings[0]
+

@@ -234,11 +234,11 @@ def execute_single_action(item: dict[str, Any]) -> None:
     elif action == "click":
         button = item.get("button", "left")
         count = int(item.get("count", 1))
-        capture_id = item.get("capture")
+        capture_id = item.get("capture") or item.get("capture_id")
         windows.click(x=int(item["x"]), y=int(item["y"]), button=button, count=count, capture_id=capture_id)
 
     elif action == "move_mouse":
-        capture_id = item.get("capture")
+        capture_id = item.get("capture") or item.get("capture_id")
         windows.move_mouse(x=int(item["x"]), y=int(item["y"]), capture_id=capture_id)
 
     elif action == "drag":
@@ -246,7 +246,7 @@ def execute_single_action(item: dict[str, Any]) -> None:
         sy = item.get("sy", item.get("from_y"))
         ex = item.get("ex", item.get("to_x"))
         ey = item.get("ey", item.get("to_y"))
-        capture_id = item.get("capture")
+        capture_id = item.get("capture") or item.get("capture_id")
         duration = float(item.get("duration", 0.2))
         windows.drag(
             sx=int(sx),

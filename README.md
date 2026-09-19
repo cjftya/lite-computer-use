@@ -69,10 +69,11 @@ All tools speak standard JSON:
 
 ### 1. Open & Discovery
 ```powershell
-# Launch app by name or alias
+# Launch app by name or alias (AppsFolder -> Start Menu -> URI -> App Paths -> exe, verifies visible window)
 py -3.13 scripts\lcu.py open_app chrome
 py -3.13 scripts\lcu.py open_app notepad
 py -3.13 scripts\lcu.py open_app 계산기
+py -3.13 scripts\lcu.py open_app paint
 
 # Open file with default application (rejects executables/scripts)
 py -3.13 scripts\lcu.py open_file "C:\Users\me\Documents\report.pdf"
@@ -99,7 +100,7 @@ py -3.13 scripts\lcu.py list_windows --query chrome
 py -3.13 scripts\lcu.py focus_window --hwnd 12345
 py -3.13 scripts\lcu.py focus_window "Visual Studio Code"
 
-# Close window (standard WM_CLOSE, no force-kill)
+# Close window (standard WM_CLOSE, verifies window destruction via polling, no force-kill)
 py -3.13 scripts\lcu.py close_window --hwnd 12345
 
 # Position and resize window (stabilize coordinate space)

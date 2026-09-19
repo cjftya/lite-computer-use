@@ -7,6 +7,7 @@ import pytest
 from scripts.lcu.errors import LCUError
 from scripts.lcu.windows import (
     click,
+    close_window,
     find_target_window,
     focus_window,
     hotkey,
@@ -140,3 +141,76 @@ def test_focus_window_fallback_failure() -> None:
             focus_window(hwnd=100)
         assert exc_info.value.code == "window_focus_failed"
         assert "Failed to focus window" in exc_info.value.message
+
+
+# ============================================================================
+# Phase 15 / Section 21 close_window Tests
+# ============================================================================
+
+def test_close_window_normal_destruction() -> None:
+    """정상 종료: WM_CLOSE -> window disappears -> closed=true"""
+    target = {"hwnd": 100, "title": "Test Window", "process": "test.exe"}
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("win32gui.PostMessage") as mock_post, \
+         patch("win32gui.IsWindow", return_value=0), \
+         patch("os.name", "nt"):
+        res = close_window(hwnd=100)
+        assert res["hwnd"] == 100
+        assert res["title"] == "Test Window"
+        assert res["closed"] is True
+        mock_post.assert_called_once()
+        import win32con
+        assert mock_post.call_args[0][1] == win32con.WM_CLOSE
+
+
+def test_close_window_late_destruction() -> None:
+    """늦은 종료: 첫 polling에서는 존재, 다음 polling에서 소멸 -> success"""
+    target = {"hwnd": 100, "title": "Late Window", "process": "late.exe"}
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("win32gui.PostMessage") as mock_post, \
+         patch("win32gui.IsWindow", side_effect=[1, 0]), \
+         patch("win32gui.IsWindowVisible", side_effect=[1, 0]), \
+         patch("time.sleep") as mock_sleep, \
+         patch("os.name", "nt"):
+        res = close_window(hwnd=100, timeout=1.0, interval=0.05)
+        assert res["hwnd"] == 100
+        assert res["closed"] is True
+        mock_post.assert_called_once()
+        assert mock_sleep.call_count == 2
+
+
+def test_close_window_timeout_failure() -> None:
+    """종료 실패: timeout까지 hwnd 유지 -> window_close_failed"""
+    target = {"hwnd": 100, "title": "Unclosable Window", "process": "app.exe"}
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("win32gui.PostMessage"), \
+         patch("win32gui.IsWindow", return_value=1), \
+         patch("win32gui.IsWindowVisible", return_value=1), \
+         patch("time.sleep"), \
+         patch("os.name", "nt"):
+        with pytest.raises(LCUError) as exc_info:
+            close_window(hwnd=100, timeout=0.1, interval=0.05)
+        assert exc_info.value.code == "window_close_failed"
+        assert "within 0.1s" in exc_info.value.message
+
+
+def test_close_window_no_force_kill() -> None:
+    """강제 종료 금지: TerminateProcess, taskkill, os.kill 등이 호출되지 않는지 보장"""
+    target = {"hwnd": 100, "title": "Stubborn Window", "process": "app.exe"}
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("win32gui.PostMessage"), \
+         patch("win32gui.IsWindow", return_value=1), \
+         patch("win32gui.IsWindowVisible", return_value=1), \
+         patch("time.sleep"), \
+         patch("os.name", "nt"), \
+         patch("subprocess.Popen") as mock_popen, \
+         patch("subprocess.run") as mock_run, \
+         patch("os.kill") as mock_os_kill:
+        with pytest.raises(LCUError) as exc_info:
+            close_window(hwnd=100, timeout=0.1, interval=0.05)
+        assert exc_info.value.code == "window_close_failed"
+        # Ensure no force killing tools were ever invoked
+        mock_popen.assert_not_called()
+        mock_run.assert_not_called()
+        mock_os_kill.assert_not_called()
+

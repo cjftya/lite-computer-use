@@ -63,6 +63,13 @@ Task Queue 생성 (첫 번째 Task -> active)
     │                └─ done_when 충족 → Task 완료 (Context 압축)
     │
     └─ 실패 발생 시 → Failure Plan (명확한 대체 경로 1회 시도, 실패 시 즉시 중단)
+    ↓
+모든 Task 완료 (Goal Completed)
+    ↓
+[Cleanup Phase] (Resource Cleanup)
+    ├─ Task Result에서 새로 열린 temporary app 확인 (reused_existing == false)
+    ├─ close_window --hwnd <hwnd> (역순 종료)
+    └─ Cleanup 종료 -> 최종 결과 보고
 ```
 
 ---
@@ -165,6 +172,9 @@ Task를 처리할 때 AI는 반드시 아래의 3단계 우선순위를 따릅�
 ## 7. Direct Tool 성공 처리
 
 - Direct Tool 실행이 성공하면 **별도의 화면 캡처 없이 해당 Task를 즉시 완료(`completed`)** 처리합니다.
+- `open_app` 성공 조건: 단순 dispatch 성공이 아니라 검증된 `hwnd`(`MainWindowHandle`)가 확보되어야 합니다.
+  - 단일 기존 창이 존재하면 자동 restore/focus 후 `reused_existing=true`, `launch_method="existing-window"`를 반환합니다.
+  - 새 창이 생성된 경우 `reused_existing=false`와 해당 창의 `hwnd`를 반환합니다.
 - 예: `open_url https://www.naver.com`이 성공하면 "네이버를 연다" Task는 완료됩니다.
 - 단, 바로 다음 Task가 화면 상의 UI 요소 조작을 필요로 하는 경우, 다음 Task의 시작 시점에 최초 캡처를 수행합니다.
 
@@ -236,6 +246,7 @@ Task가 완료되면 LLM 대화 컨텍스트에서 불필요한 과거 세부정
 - **유지할 데이터**:
   - 한 줄 완료 요약 (`completed_tasks_summary`)
   - 다음 Task에 전달할 핵심 결과값 (`result` - 파일 경로, URL, 창 hwnd 등)
+  - **Context 압축 예외**: 작업 중 새로 열린 앱의 `hwnd`, `reused_existing`, `launch_method`는 Goal 종료 직전 Cleanup을 위해 Task `result`에 보존해야 하며, cleanup이 완료된 뒤 폐기합니다.
 
 ---
 
@@ -342,3 +353,47 @@ Task가 완료되면 LLM 대화 컨텍스트에서 불필요한 과거 세부정
 ### 시나리오 8: Ambiguous Target 해소
 - 상황: `focus_window "chrome"` 호출 시 일치하는 창 2개 반환 (`ambiguous_target`)
 - 복구: 컨텍스트에서 원하는 탭의 구체적 제목("네이버 - Chrome")을 확인 -> `focus_window "네이버 - Chrome"` 1회 시도 -> 성공
+
+---
+
+## 16. 자원 정리 규칙 (Resource Cleanup Protocol)
+
+작업(Goal) 완료 직전에 AI Orchestrator는 완료된 Task의 `result`를 확인하여 임시 앱을 안전하게 정리합니다:
+
+### 전체 실행 흐름
+```text
+Goal Completed (모든 본 작업 완료)
+    ↓
+Task result에서 새로 열린 temporary app 확인 (reused_existing == false)
+    ↓
+close_window --hwnd <hwnd> (역순 종료)
+    ↓
+Cleanup 종료 -> 최종 결과 보고
+```
+
+### Cleanup 실행 규칙
+1. **역순 종료**: 여러 앱을 실행한 경우 최근에 실행한 앱부터 역순으로 닫습니다.
+2. **Cleanup 실패 처리**:
+   - Cleanup은 본 작업 결과를 뒤집지 않습니다.
+   - 예: Main Goal 성공 후 Calculator 창 닫기 실패 시, 작업 자체는 성공으로 유지하고 cleanup warning만 기록합니다.
+   - 창이 닫히지 않는다고 강제 프로세스 종료(`taskkill /F`, `os.kill`)를 호출하지 않습니다.
+
+---
+
+## 17. 앱 소유권 규칙 (App Ownership Rules)
+
+AI Orchestrator가 어떤 창을 닫고 어떤 창을 유지해야 하는지에 대한 엄격한 소유권 원칙입니다:
+
+### 자동 종료 대상 (모두 충족 시에만)
+1. `open_app`으로 에이전트가 직접 실행함.
+2. `reused_existing == false` (기존 창이 아님).
+3. 해당 앱이 중간 작업용(temporary/intermediate)임.
+4. 사용자의 최종 결과물(final result)로 남길 필요가 없음.
+→ `close_window --hwnd <hwnd>`
+
+### 자동 종료 금지 (반드시 유지)
+1. **기존 사용자 앱**: `reused_existing == true`인 창은 절대 닫지 않습니다.
+2. **최종 결과 앱**: 예컨대 "계산기로 계산하고 결과를 메모장에 적어줘" 요청에서 메모장은 사용자가 확인해야 할 최종 결과이므로 닫지 않습니다.
+3. **기존 브라우저 창/탭**: 사용자가 열어둔 브라우저 인스턴스는 유지합니다.
+4. **소유권 불명확 창**: 에이전트가 직접 연 것이 확실하지 않은 HWND는 안전하게 유지합니다.
+

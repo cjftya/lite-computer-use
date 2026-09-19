@@ -12,9 +12,11 @@ import pytest
 from scripts.lcu.apps import (
     APP_INDEX_CACHE_VERSION,
     AppEntry,
+    LaunchCandidate,
     _is_packaged_app_command,
     _wait_for_visible_app_window,
     build_app_index,
+    classify_launch_method,
     find_app_entry,
     open_app,
 )
@@ -178,159 +180,240 @@ def test_apps_matching() -> None:
     assert len(cand) == 2
 
 
-def test_open_app_mocked() -> None:
-    with patch("scripts.lcu.apps.build_app_index") as mock_build:
-        mock_build.return_value = [
-            AppEntry("Notepad", "notepad.exe", "config", ["notepad", "메모장"], "notepad")
-        ]
-        with patch("os.startfile") as mock_start:
-            res = open_app("notepad")
-            assert res["app"] == "Notepad"
-            mock_start.assert_called_once_with("notepad.exe")
+# ============================================================================
+# Phase 14 / Section 20 Unit Tests
+# ============================================================================
 
-        # Not found error
-        with pytest.raises(LCUError) as exc_info:
-            open_app("nonexistent")
-        assert exc_info.value.code == "not_found"
+def test_classify_launch_method() -> None:
+    """20.1 App launch candidate 분류"""
+    # shell:AppsFolder\... -> appsfolder
+    assert classify_launch_method(r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App") == "appsfolder"
+    assert classify_launch_method(r"shell:appsfolder\windows.immersivecontrolpanel_cw5n1h2txyewy!app") == "appsfolder"
+
+    # *.lnk -> start-menu
+    assert classify_launch_method(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Visual Studio Code.lnk") == "start-menu"
+    assert classify_launch_method("test.lnk") == "start-menu"
+
+    # msteams:, ms-settings: -> uri
+    assert classify_launch_method("msteams:") == "uri"
+    assert classify_launch_method("ms-settings:") == "uri"
+    assert classify_launch_method("https://example.com") == "uri"
+
+    # *.exe -> app-paths or exe
+    assert classify_launch_method("notepad.exe", source="config") == "exe"
+    assert classify_launch_method("C:\\Program Files\\app.exe", source="app-paths") == "app-paths"
+    assert classify_launch_method("code.cmd", source="config") == "exe"
 
 
-def test_open_app_primary_window_appears_before_timeout() -> None:
-    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+def test_candidate_priority_appsfolder_first() -> None:
+    """20.2 AppsFolder 우선: Paint candidate [AppsFolder, mspaint.exe]일 때 AppsFolder가 먼저 정렬되는지 확인"""
+    appsfolder_cmd = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
+    # Given commands with exe first, candidate sorting must put AppsFolder first
     entry = AppEntry(
-        "Notepad",
-        "notepad.exe",
-        "config",
-        ["notepad"],
-        "notepad",
-        commands=["notepad.exe", app_x_cmd],
+        name="Paint",
+        target="mspaint.exe",
+        source="config",
+        aliases=["paint", "그림판"],
+        normalized="paint",
+        commands=["mspaint.exe", appsfolder_cmd],
     )
-    poll_round = 0
+    assert len(entry.candidates) == 2
+    assert entry.candidates[0].method == "appsfolder"
+    assert entry.candidates[0].target == appsfolder_cmd
+    assert entry.candidates[1].method == "exe"
+    assert entry.candidates[1].target == "mspaint.exe"
 
-    def mock_list_wins(query: str | None = None):
-        nonlocal poll_round
-        if query == "Notepad":
-            poll_round += 1
-        if poll_round >= 3:
-            return [{"title": "Notepad"}]
+
+def test_open_app_appsfolder_success() -> None:
+    """20.3 AppsFolder 성공: dispatch AppsFolder -> visible window 발견 -> exe candidate 실행 안 함, launch_method=appsfolder, hwnd 반환"""
+    appsfolder_cmd = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        name="Paint",
+        target=appsfolder_cmd,
+        source="config",
+        aliases=["paint", "그림판"],
+        normalized="paint",
+        commands=[appsfolder_cmd, "mspaint.exe"],
+    )
+    mock_win = {"hwnd": 3345694, "title": "Paint", "process": "mspaint.exe", "active": True}
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]):
+        res = open_app("paint")
+        assert res["app"] == "Paint"
+        assert res["target"] == appsfolder_cmd
+        assert res["launch_method"] == "appsfolder"
+        assert res["hwnd"] == 3345694
+        assert res["title"] == "Paint"
+        assert res["reused_existing"] is False
+        # Only AppsFolder was dispatched, mspaint.exe was NOT executed
+        mock_start.assert_called_once_with(appsfolder_cmd)
+
+
+def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
+    """20.4 AppsFolder 실패 -> exe fallback: mock AppsFolder dispatch but no visible window -> exe -> visible window 발견. 두 candidate 각각 1회, exe 성공"""
+    appsfolder_cmd = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
+    entry = AppEntry(
+        name="Paint",
+        target=appsfolder_cmd,
+        source="config",
+        aliases=["paint", "그림판"],
+        normalized="paint",
+        commands=[appsfolder_cmd, "mspaint.exe"],
+    )
+
+    poll_count = 0
+    def mock_list():
+        nonlocal poll_count
+        poll_count += 1
+        # Initial checks (calls 1, 2) and Candidate 1 polling (calls 3 to 28): no window found
+        # During exe candidate polling (call > 28): window appears
+        if poll_count > 28:
+            return [{"hwnd": 556677, "title": "Paint", "process": "mspaint.exe", "active": True}]
         return []
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("os.startfile") as mock_start, \
-         patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins) as mock_list, \
-         patch("time.sleep") as mock_sleep:
-        res = open_app("notepad")
-        assert res["app"] == "Notepad"
-        assert res["target"] == "notepad.exe"
-        mock_start.assert_called_once_with("notepad.exe")
-        # Early exit: sleep called 2 times before 3rd check succeeds
-        assert mock_sleep.call_count == 2
-
-
-def test_open_app_primary_timeout_then_appx_success() -> None:
-    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
-    entry = AppEntry(
-        "Notepad",
-        "notepad.exe",
-        "config",
-        ["notepad"],
-        "notepad",
-        commands=["notepad.exe", app_x_cmd],
-    )
-    poll_round = 0
-
-    def mock_list_wins(query: str | None = None):
-        nonlocal poll_round
-        if query == "Notepad":
-            poll_round += 1
-        # Primary timeout takes 16 checks (timeout 1.5 / interval 0.1 + 1).
-        # On 17th round (first fallback check), window is found.
-        if poll_round > 16:
-            return [{"title": "Notepad"}]
-        return []
-
-    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
-         patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins), \
+         patch("scripts.lcu.windows.list_windows", side_effect=mock_list), \
          patch("time.sleep"):
-        res = open_app("notepad")
-        assert res["app"] == "Notepad"
-        assert res["target"] == app_x_cmd
+        res = open_app("paint")
+        assert res["app"] == "Paint"
+        assert res["target"] == "mspaint.exe"
+        assert res["launch_method"] == "exe"
+        assert res["hwnd"] == 556677
+        assert res["reused_existing"] is False
         assert mock_start.call_count == 2
-        mock_start.assert_any_call("notepad.exe")
-        mock_start.assert_any_call(app_x_cmd)
+        mock_start.assert_any_call(appsfolder_cmd)
+        mock_start.assert_any_call("mspaint.exe")
 
 
-def test_open_app_primary_timeout_appx_dispatch_error() -> None:
-    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+def test_open_app_all_candidates_fail() -> None:
+    """20.5 모든 candidate 실패: dispatch_failed 반환, 동일 command 반복 없음"""
+    appsfolder_cmd = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
     entry = AppEntry(
-        "Notepad",
-        "notepad.exe",
-        "config",
-        ["notepad", "메모장"],
-        "notepad",
-        commands=["notepad.exe", app_x_cmd],
+        name="Paint",
+        target=appsfolder_cmd,
+        source="config",
+        aliases=["paint", "그림판"],
+        normalized="paint",
+        commands=[appsfolder_cmd, "mspaint.exe"],
     )
-    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
-         patch("os.startfile", side_effect=[None, OSError("AppX package failed to launch")]) as mock_start, \
-         patch("scripts.lcu.windows.list_windows", return_value=[]), \
-         patch("time.sleep"):
-        with pytest.raises(LCUError) as exc_info:
-            open_app("notepad")
-        assert exc_info.value.code == "dispatch_failed"
-        assert mock_start.call_count == 2
 
-
-def test_open_app_primary_timeout_appx_no_window() -> None:
-    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
-    entry = AppEntry(
-        "Notepad",
-        "notepad.exe",
-        "config",
-        ["notepad", "메모장"],
-        "notepad",
-        commands=["notepad.exe", app_x_cmd],
-    )
-    # Both primary and fallback produce no window
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("os.startfile") as mock_start, \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
          patch("time.sleep"):
         with pytest.raises(LCUError) as exc_info:
-            open_app("notepad")
+            open_app("paint")
         assert exc_info.value.code == "dispatch_failed"
         assert mock_start.call_count == 2
+        assert exc_info.value.attempts is not None
+        assert len(exc_info.value.attempts) == 2
+        assert exc_info.value.attempts[0]["target"] == appsfolder_cmd
+        assert exc_info.value.attempts[0]["result"] == "no_visible_window"
+        assert exc_info.value.attempts[1]["target"] == "mspaint.exe"
+        assert exc_info.value.attempts[1]["result"] == "no_visible_window"
 
 
-def test_open_app_packaged_fallback_on_dispatch_error() -> None:
-    app_x_cmd = r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"
+def test_open_app_existing_minimized_window_reused() -> None:
+    """20.6 기존 최소화 창: single match -> focus_window(hwnd), no launch candidate dispatch, reused_existing=True"""
     entry = AppEntry(
-        "Calculator",
-        "calc.exe",
-        "config",
-        ["calculator", "계산기"],
-        "calculator",
-        commands=["calc.exe", app_x_cmd],
+        name="Chrome",
+        target="chrome.exe",
+        source="config",
+        aliases=["chrome", "google chrome", "크롬"],
+        normalized="chrome",
+        commands=["chrome.exe"],
     )
+    existing_win = {
+        "hwnd": 4852350,
+        "title": "New Tab - Google Chrome",
+        "process": "chrome.exe",
+        "active": False,
+        "minimized": True,
+        "bounds": {"x": -32000, "y": -32000, "width": 160, "height": 30},
+    }
+
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile", side_effect=[OSError("Failed to start calc.exe"), None]) as mock_start, \
-         patch("scripts.lcu.windows.list_windows", return_value=[{"title": "Calculator"}]), \
-         patch("time.sleep"):
-        res = open_app("calculator")
-        assert res["app"] == "Calculator"
-        assert res["target"] == app_x_cmd
-        assert mock_start.call_count == 2
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.list_windows", return_value=[existing_win]), \
+         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 4852350, "title": existing_win["title"]}) as mock_focus:
+        res = open_app("chrome")
+        assert res["app"] == "Chrome"
+        assert res["hwnd"] == 4852350
+        assert res["reused_existing"] is True
+        assert res["launch_method"] == "existing-window"
+        assert res["target"] is None
+        mock_focus.assert_called_once_with(hwnd=4852350)
+        mock_start.assert_not_called()
+
+
+def test_open_app_multiple_existing_windows_no_arbitrary_focus() -> None:
+    """20.7 기존 창 여러 개: 임의 HWND 선택 금지, launch candidate 실행"""
+    entry = AppEntry(
+        name="Chrome",
+        target="chrome.exe",
+        source="config",
+        aliases=["chrome", "google chrome", "크롬"],
+        normalized="chrome",
+        commands=["chrome.exe"],
+    )
+    win1 = {"hwnd": 101, "title": "Chrome Window 1", "process": "chrome.exe", "active": False}
+    win2 = {"hwnd": 102, "title": "Chrome Window 2", "process": "chrome.exe", "active": False}
+    win3 = {"hwnd": 103, "title": "Chrome Window 3", "process": "chrome.exe", "active": True}
+
+    call_count = 0
+    def mock_list_wins():
+        nonlocal call_count
+        call_count += 1
+        # Before launch: 2 windows
+        if call_count <= 2:
+            return [win1, win2]
+        # After launch: 3rd window appears
+        return [win1, win2, win3]
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.windows.focus_window") as mock_focus, \
+         patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins):
+        res = open_app("chrome")
+        # Should not have called focus_window prior to launching
+        mock_focus.assert_not_called()
+        mock_start.assert_called_once_with("chrome.exe")
+        assert res["hwnd"] == 103
+        assert res["reused_existing"] is False
+        assert res["launch_method"] == "exe"
+
+
+def test_open_app_response_fields() -> None:
+    """20.8 open_app response 필수 필드: app, target, launch_method, hwnd, title, reused_existing"""
+    entry = AppEntry("Notepad", "notepad.exe", "config", ["notepad"], "notepad")
+    mock_win = {"hwnd": 1234, "title": "Untitled - Notepad", "process": "notepad.exe", "active": True}
+
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("os.name", "nt"), \
+         patch("os.startfile"), \
+         patch("scripts.lcu.windows.list_windows", return_value=[mock_win]):
+        res = open_app("notepad")
+        assert "app" in res
+        assert "target" in res
+        assert "launch_method" in res
+        assert "hwnd" in res
+        assert "title" in res
+        assert "reused_existing" in res
 
 
 def test_wait_for_visible_app_window_early_exit() -> None:
     entry = AppEntry("TestApp", "test.exe", "config", [], "testapp")
     # Immediate find on check 1
     with patch("os.name", "nt"), \
-         patch("scripts.lcu.windows.list_windows", return_value=[{"title": "TestApp"}]), \
+         patch("scripts.lcu.windows.list_windows", return_value=[{"title": "TestApp", "process": "test.exe"}]), \
          patch("time.sleep") as mock_sleep:
         found = _wait_for_visible_app_window(entry, timeout=1.2, interval=0.1)
         assert found is True
@@ -338,57 +421,11 @@ def test_wait_for_visible_app_window_early_exit() -> None:
 
     # Find on check 2
     with patch("os.name", "nt"), \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [{"title": "TestApp"}]]), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [{"title": "TestApp", "process": "test.exe"}]]), \
          patch("time.sleep") as mock_sleep:
         found = _wait_for_visible_app_window(entry, timeout=1.2, interval=0.1)
         assert found is True
         assert mock_sleep.call_count == 1
-
-
-def test_open_app_general_multi_command_no_window_verification() -> None:
-    entry = AppEntry(
-        "Outlook",
-        "outlook.exe",
-        "config",
-        ["outlook", "아웃룩"],
-        "outlook",
-        commands=["outlook.exe", "olk.exe"],
-    )
-    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
-         patch("scripts.lcu.windows.list_windows") as mock_list, \
-         patch("time.sleep") as mock_sleep:
-        res = open_app("outlook")
-        assert res["app"] == "Outlook"
-        assert res["target"] == "outlook.exe"
-        mock_start.assert_called_once_with("outlook.exe")
-        mock_list.assert_not_called()
-        mock_sleep.assert_not_called()
-
-
-def test_open_app_general_multi_command_fallback_on_error() -> None:
-    entry = AppEntry(
-        "Teams",
-        "ms-teams.exe",
-        "config",
-        ["teams", "팀즈"],
-        "teams",
-        commands=["ms-teams.exe", "msteams:"],
-    )
-    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
-         patch("os.startfile", side_effect=[OSError("Executable not found"), None]) as mock_start, \
-         patch("scripts.lcu.windows.list_windows") as mock_list, \
-         patch("time.sleep") as mock_sleep:
-        res = open_app("teams")
-        assert res["app"] == "Teams"
-        assert res["target"] == "msteams:"
-        assert mock_start.call_count == 2
-        mock_start.assert_any_call("ms-teams.exe")
-        mock_start.assert_any_call("msteams:")
-        mock_list.assert_not_called()
-        mock_sleep.assert_not_called()
 
 
 def test_is_packaged_app_command() -> None:
@@ -436,7 +473,7 @@ def test_build_app_index_cache_version_invalidation(tmp_path: Path) -> None:
         mock_load.assert_called_once()
         mock_load.reset_mock()
 
-        # 3. Old version (version = 1) -> triggers rebuild
+        # 3. Old version (version = 1 or 2) -> triggers rebuild
         cache_file.write_text(
             json.dumps({"version": 1, "timestamp": time.time(), "apps": [entry_dict]}),
             encoding="utf-8",
@@ -450,4 +487,3 @@ def test_build_app_index_cache_version_invalidation(tmp_path: Path) -> None:
         written = json.loads(cache_file.read_text(encoding="utf-8"))
         assert written.get("version") == APP_INDEX_CACHE_VERSION
         assert "commands" in written["apps"][0]
-

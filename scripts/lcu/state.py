@@ -195,6 +195,43 @@ class PlanState:
         lines.append(f"Recovery Used: {self.recovery_used}")
         return "\n".join(lines)
 
+    def get_cleanup_targets(
+        self,
+        keep_hwnds: set[int] | None = None,
+        keep_apps: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Identify temporary application windows that should be cleaned up upon goal completion.
+
+        Criteria:
+        - Must be completed task result with a verified hwnd.
+        - Must have reused_existing == False.
+        - Must not be in keep_hwnds or keep_apps (e.g. final result apps).
+        - Returned in reverse order of task execution.
+        """
+        keep_hwnds = keep_hwnds or set()
+        keep_apps = {a.lower() for a in (keep_apps or set())}
+        targets: list[dict[str, Any]] = []
+        seen_hwnds: set[int] = set()
+
+        for task in reversed(self.tasks):
+            if task.status != "completed" or not isinstance(task.result, dict):
+                continue
+            res = task.result
+            hwnd = res.get("hwnd")
+            if not hwnd or res.get("reused_existing") is True:
+                continue
+            if hwnd in seen_hwnds or hwnd in keep_hwnds:
+                continue
+            app_name = str(res.get("app", "")).lower()
+            if app_name in keep_apps:
+                continue
+
+            seen_hwnds.add(hwnd)
+            targets.append(res)
+
+        return targets
+
+
 
 def create_plan(goal: str, tasks: list[dict[str, Any] | Task]) -> PlanState:
     """Create an initial PlanState from a goal and a list of semantic tasks."""

@@ -287,7 +287,12 @@ def focus_window(query: str | None = None, hwnd: int | None = None) -> dict[str,
     return {"hwnd": target_hwnd, "title": target["title"]}
 
 
-def close_window(query: str | None = None, hwnd: int | None = None) -> dict[str, Any]:
+def close_window(
+    query: str | None = None,
+    hwnd: int | None = None,
+    timeout: float = 2.0,
+    interval: float = 0.05,
+) -> dict[str, Any]:
     init_windows_environment()
     import win32con
     import win32gui
@@ -297,7 +302,48 @@ def close_window(query: str | None = None, hwnd: int | None = None) -> dict[str,
 
     # Post WM_CLOSE message
     win32gui.PostMessage(target_hwnd, win32con.WM_CLOSE, 0, 0)
-    return {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+
+    if os.name != "nt":
+        return {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+
+    def is_window_gone(h: int) -> bool:
+        try:
+            if not win32gui.IsWindow(h):
+                return True
+            if not win32gui.IsWindowVisible(h):
+                return True
+            cloaked = ctypes.c_int(0)
+            res = ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+            if res == 0 and cloaked.value != 0:
+                return True
+            return False
+        except Exception:
+            return True
+
+    t_end = time.time() + timeout
+    max_checks = max(1, int(round(timeout / interval)) + 1) if interval > 0 else 1
+    checks = 0
+
+    while checks < max_checks:
+        if interval > 0:
+            time.sleep(interval)
+        checks += 1
+
+        if is_window_gone(target_hwnd):
+            return {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+
+        if time.time() >= t_end or checks >= max_checks:
+            break
+
+    # Final check
+    if is_window_gone(target_hwnd):
+        return {"hwnd": target_hwnd, "title": target["title"], "closed": True}
+
+    raise LCUError(
+        "window_close_failed",
+        f"Failed to close window (hwnd: {target_hwnd}, title: '{target['title']}') within {timeout}s",
+    )
+
 
 
 def set_window_bounds(

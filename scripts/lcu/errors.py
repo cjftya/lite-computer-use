@@ -11,12 +11,16 @@ class LCUError(Exception):
         message: str,
         candidates: list[Any] | None = None,
         details: dict[str, Any] | None = None,
+        attempts: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.candidates = candidates
         self.details = details or {}
+        self.attempts = attempts
+        if attempts is not None:
+            self.details["attempts"] = attempts
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -25,6 +29,8 @@ class LCUError(Exception):
         }
         if self.candidates is not None:
             data["candidates"] = self.candidates
+        if self.attempts is not None:
+            data["attempts"] = self.attempts
         if self.details:
             data["details"] = self.details
         return data
