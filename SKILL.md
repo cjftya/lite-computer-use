@@ -18,7 +18,7 @@ py -3.13 scripts\lcu.py <tool> [args]
 ## 1. Tool 목록 (Public Tools)
 
 ### Open & Discovery
-- `open_app <name> [--debug]`: Launch an application through deduplicated normalized-process / Windows Shell candidates, verify a visible window, and bring it to foreground. Executable launches remove only confirmed CLI-specific Electron/VS Code inheritance variables. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and `owned_processes`. Reuses and restores a single matching existing window automatically.
+- `open_app <name> [--debug]`: Launch an application through deduplicated normalized-process / Windows Shell candidates, verify a visible window, and bring it to foreground. Executable launches apply the current narrow Electron/VS Code environment-drop policy; treat its root-cause status as unconfirmed until same-host A/B evidence exists. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and exact-dispatch-only `owned_processes`. Reuses and restores a single matching existing window automatically.
 - `open_file <absolute-path>`: Open file with default associated application.
 - `open_folder <absolute-path-or-alias>`: Open folder in Explorer (`desktop`, `documents`, `downloads`, `바탕화면`, `문서`, `다운로드`).
 - `open_url <url>`: Open `http://` or `https://` URL in default browser.
@@ -121,7 +121,7 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
   2. `reused_existing` 필드가 누락되었거나 `focus_window` 결과 등 소유권이 불명확한 창
   3. 사용자의 최종 결과로 남겨야 하는 창 (예: "메모장에 결과를 적어줘" 요청의 메모장)
   4. 기존 브라우저 창 또는 탭
-  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 이번 launch에서 새로 생성된 것이 입증된 `owned_processes`만 엄격한 안전성 검증(PID + creation time 재검증, denylist 제외, 타 창 미소유)을 통과한 후 정리됩니다. 소유권은 `%TEMP%\LiteComputerUse\owned-processes.json`에도 최소 정보로 유지되므로 다음 CLI invocation의 `close_window`에서도 같은 검증을 거칩니다.
+  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 exact executable dispatch identity로 입증된 `owned_processes`만 PID + creation time + image + session + 타 창 검증을 통과한 뒤 정리됩니다. Shell/shortcut/URI/broker 및 새 same-name PID는 소유하지 않습니다. `%TEMP%\LiteComputerUse\owned-processes.json`의 live evidence가 없는 caller JSON도 종료 권한을 부여하지 않습니다.
 - **종료 순서**:
   여러 앱을 실행한 경우 최근에 실행한 앱부터 **역순**으로 닫습니다.
 - **Cleanup 실패 처리**:

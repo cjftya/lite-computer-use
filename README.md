@@ -199,9 +199,10 @@ py -3.13 -m pytest
 ### PowerShell / Antigravity launch-context parity
 
 Run the same diagnostic once from PowerShell and once from Antigravity Bash before
-comparing GUI behavior. It reports only selected Electron/VS Code/Node/shell variables,
-a PATH hash, executable resolution, session, window station, and desktop; it never emits
-the complete environment or PATH value.
+comparing GUI behavior. Selected environment values are reported only as presence,
+length, and a locally keyed fingerprint; only validated boolean flags may show a value.
+It also reports a PATH hash, executable resolution, session, window station, and desktop
+status. Raw token, IPC-hook, shell-path, complete environment, and PATH values are not emitted.
 
 ```powershell
 py -3.13 scripts\lcu.py launch_context > powershell-launch-context.json
@@ -211,20 +212,25 @@ py -3.13 scripts\lcu.py launch_context > powershell-launch-context.json
 py -3.13 scripts/lcu.py launch_context > antigravity-launch-context.json
 ```
 
-Executable GUI launches receive a copied environment with only
+Executable GUI launches currently receive a copied environment with only
 `ELECTRON_RUN_AS_NODE`, `ELECTRON_NO_ATTACH_CONSOLE`, and `VSCODE_IPC_HOOK_CLI`
-removed. `NODE_OPTIONS` and other variable families remain untouched unless future
-diagnostics prove they are unsafe. Standard input/output/error are detached, and the
-launch working directory is the executable directory or the user profile fallback.
+removed. This is a bounded candidate policy pending same-host PowerShell/Antigravity
+A/B confirmation, not a confirmed root cause. `NODE_OPTIONS` and other variable families
+remain untouched. Standard input/output/error are detached, and the launch working
+directory is the executable directory or the user profile fallback.
 
 Window readiness uses a 2.5-second fast stage and extends to an 8-second total deadline
-only when the attempt created a live process. Rollback occurs after the final deadline.
+only when the exact dispatcher identity is still live. Rollback occurs after the final
+deadline and only for that exact dispatcher identity; an unrelated new same-name PID is
+never treated as owned.
 Executable wrappers from the same family (for example `code.exe` and `code.cmd`) are
 attempted once; a structurally different Windows Shell shortcut may remain as fallback.
 
-LCU-owned processes are recorded in `%TEMP%\LiteComputerUse\owned-processes.json`.
-Every later use revalidates PID plus creation time and image/name identity before cleanup.
-The ledger never authorizes process-name-wide termination.
+Only exact executable dispatcher identities can be recorded as LCU-owned in
+`%TEMP%\LiteComputerUse\owned-processes.json`. Shell, shortcut, URI, broker, and
+same-name-only observations remain unowned. Later cleanup requires live ledger evidence
+plus PID, creation time, image, session, and window checks. Lookup errors fail closed and
+the ledger never authorizes process-name-wide termination.
 
 ### Real Windows Smoke Test Suite
 Launches a live Tkinter GUI fixture with known button and canvas targets, captures screenshots across presets, resolves coordinates, tests hits, drags, and batch actions:

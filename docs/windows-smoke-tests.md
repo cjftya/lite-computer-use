@@ -86,9 +86,11 @@ py -3.13 scripts/lcu.py launch_context > antigravity-launch-context.json
 py -3.13 scripts/lcu.py open_app vscode --debug
 ```
 
-Compare `parent_process`, `session_id`, `window_station`, `desktop`, selected
-`environment`, PATH hash/resolution, and `gui_env_normalization.dropped_keys`. Both app
-commands pass only when `ok=true`, `hwnd` is non-zero, and the window is foreground.
+Compare `parent_process`, `session_id`, `window_station.status/value`,
+`desktop.status/value`, selected environment presence/length/fingerprint, PATH
+hash/resolution, and `gui_env_normalization.dropped_keys`. The diagnostic itself reports
+`gui_env_normalization.applied=false`; only an executable dispatch may report it as true.
+Both app commands pass only when `ok=true`, `hwnd` is non-zero, and the window is foreground.
 
 ### 4.2 Chrome with GPT PWA already open
 
@@ -99,15 +101,17 @@ PWA HWND must not be returned, focused, closed, or included in owned cleanup.
 ### 4.3 Repetition and cleanup
 
 For every iteration, preserve the exact `hwnd`, `reused_existing`, `launch_method`, and
-`owned_processes` returned by `open_app`. Close only a newly launched window:
+`owned_processes` returned by `open_app`. Close only a newly launched window. Caller JSON
+does not independently authorize termination; cleanup also requires matching live ledger
+evidence. Shell/broker launches may therefore be window-only:
 
 ```powershell
 py -3.13 scripts\lcu.py close_window --hwnd <hwnd> --owned-processes '<exact-json>'
 ```
 
-- Notepad: 20 open/close iterations; no matching live entry may remain in
-  `%TEMP%\LiteComputerUse\owned-processes.json`, and no LCU-created Notepad process or
-  visible window may remain.
+- Notepad: 20 open/close iterations per shell. No matching live ledger entry or visible
+  test window may remain. If broker ownership cannot be proven and a process remains,
+  preserve it and record the case as BLOCKED rather than force-killing it.
 - Paint: 5 iterations.
 - Calculator: 5 iterations.
 - Electron: VS Code plus one installed extra Electron application when available.

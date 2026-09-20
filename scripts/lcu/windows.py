@@ -311,16 +311,38 @@ def close_window(
 
     target = find_target_window(query=query, hwnd=hwnd)
     target_hwnd = target["hwnd"]
+    cleanup_warnings: list[dict[str, Any]] = []
 
-    if owned_processes is None and cleanup_owned_processes:
+    if cleanup_owned_processes:
         try:
-            from .ownership import owned_processes_for_window
+            from .ownership import authorize_owned_processes, owned_processes_for_window
 
-            owned_processes = owned_processes_for_window(
-                hwnd=target_hwnd,
-                window_pid=target.get("pid"),
-            )
+            if owned_processes is None:
+                owned_processes = owned_processes_for_window(
+                    hwnd=target_hwnd,
+                    window_pid=target.get("pid"),
+                )
+            else:
+                requested_count = len(owned_processes)
+                owned_processes = authorize_owned_processes(
+                    hwnd=target_hwnd,
+                    window_pid=target.get("pid"),
+                    candidates=owned_processes,
+                )
+                if len(owned_processes) != requested_count:
+                    cleanup_warnings.append(
+                        {
+                            "code": "ownership_not_authorized",
+                            "message": "Caller-supplied process metadata was not backed by live ledger evidence",
+                        }
+                    )
         except Exception:
+            cleanup_warnings.append(
+                {
+                    "code": "ownership_lookup_failed",
+                    "message": "Owned-process cleanup was skipped because authorization could not be verified",
+                }
+            )
             owned_processes = None
 
     # Post WM_CLOSE message
@@ -381,19 +403,35 @@ def close_window(
                 mode = p.get("cleanup_mode")
                 if mode is not None and mode != "owned-after-close":
                     continue
-                parsed_identities.append(ProcessIdentity.from_dict(p))
+                try:
+                    parsed_identities.append(ProcessIdentity.from_dict(p))
+                except (KeyError, TypeError, ValueError):
+                    cleanup_warnings.append(
+                        {"code": "invalid_process_identity", "message": "Invalid cleanup identity was skipped"}
+                    )
 
         if parsed_identities:
             # 1. Natural exit wait: poll up to 1.0s
             t_exit_end = time.time() + 1.0
             while time.time() < t_exit_end:
-                if not any(is_process_alive(p) for p in parsed_identities):
+                states = [is_process_alive(p) for p in parsed_identities]
+                if all(state is False for state in states):
                     break
                 time.sleep(0.1)
 
             # 2. For any still alive, perform safety validation and terminate
             for p in parsed_identities:
-                if not is_process_alive(p):
+                alive = is_process_alive(p)
+                if alive is False:
+                    continue
+                if alive is None:
+                    cleanup_warnings.append(
+                        {
+                            "code": "process_state_unknown",
+                            "pid": p.pid,
+                            "message": "Process state could not be verified; cleanup was skipped",
+                        }
+                    )
                     continue
                 safe, reason = validate_termination_safety(
                     identity=p,
@@ -402,8 +440,20 @@ def close_window(
                 if safe:
                     if terminate_process(p, timeout=2.0):
                         cleaned_processes.append(p.pid)
+                    else:
+                        cleanup_warnings.append(
+                            {
+                                "code": "terminate_failed",
+                                "pid": p.pid,
+                                "message": "Process termination was not confirmed",
+                            }
+                        )
+                else:
+                    cleanup_warnings.append(
+                        {"code": "cleanup_blocked", "pid": p.pid, "message": reason}
+                    )
 
-            released = [p for p in parsed_identities if not is_process_alive(p)]
+            released = [p for p in parsed_identities if is_process_alive(p) is False]
             if released:
                 try:
                     from .ownership import forget_owned_processes
@@ -415,6 +465,8 @@ def close_window(
     res: dict[str, Any] = {"hwnd": target_hwnd, "title": target["title"], "closed": True}
     if cleaned_processes:
         res["cleaned_processes"] = cleaned_processes
+    if cleanup_warnings:
+        res["cleanup_warnings"] = cleanup_warnings
     return res
 
 

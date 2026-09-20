@@ -109,8 +109,8 @@ def test_p4_after_only_process_is_new_candidate() -> None:
 # Section 30: Tests — Notepad (N1 - N3)
 # ============================================================================
 
-def test_n1_notepad_new_launch_ownership() -> None:
-    """N1: BEFORE: Notepad.exe 없음 -> open_app notepad -> AFTER: Notepad.exe PID 100 -> owned_processes = [PID 100]"""
+def test_n1_notepad_broker_launch_does_not_claim_process_ownership() -> None:
+    """A Shell/broker launch cannot claim a same-name process as LCU-owned."""
     entry = AppEntry(
         name="notepad",
         target=r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
@@ -142,10 +142,7 @@ def test_n1_notepad_new_launch_ownership() -> None:
         assert res["hwnd"] == 7771
         assert res["reused_existing"] is False
         assert res["window_pid"] == 100
-        assert len(res["owned_processes"]) == 1
-        assert res["owned_processes"][0]["pid"] == 100
-        assert res["owned_processes"][0]["process_name"] == "Notepad.exe"
-        assert res["owned_processes"][0]["cleanup_mode"] == "owned-after-close"
+        assert res["owned_processes"] == []
 
 
 def test_n2_notepad_cleanup_terminates_lingering_owned_process() -> None:
@@ -159,8 +156,12 @@ def test_n2_notepad_cleanup_terminates_lingering_owned_process() -> None:
         session_id=1,
     )
     target = {"hwnd": 7771, "title": "Untitled - Notepad", "process": "Notepad.exe", "pid": 100}
+    owned = notepad_ident.to_dict()
+    owned["cleanup_mode"] = "owned-after-close"
+    owned["ownership_evidence"] = "exact-dispatch-identity"
 
     with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("scripts.lcu.ownership.authorize_owned_processes", return_value=[owned]), \
          patch("win32gui.PostMessage"), \
          patch("win32gui.IsWindow", return_value=0), \
          patch("scripts.lcu.processes.is_process_alive", return_value=True), \
@@ -170,7 +171,7 @@ def test_n2_notepad_cleanup_terminates_lingering_owned_process() -> None:
          patch("os.name", "nt"):
         res = close_window(
             hwnd=7771,
-            owned_processes=[notepad_ident.to_dict()],
+            owned_processes=[owned],
         )
         assert res["closed"] is True
         assert res["cleaned_processes"] == [100]
@@ -189,6 +190,7 @@ def test_n2b_close_window_recovers_owned_processes_from_ledger() -> None:
     )
     owned = notepad_ident.to_dict()
     owned["cleanup_mode"] = "owned-after-close"
+    owned["ownership_evidence"] = "exact-dispatch-identity"
     target = {"hwnd": 7773, "title": "Untitled - Notepad", "process": "Notepad.exe", "pid": 101}
 
     with patch("scripts.lcu.windows.find_target_window", return_value=target), \
@@ -321,7 +323,10 @@ def test_c4_chrome_failed_launch_rollback() -> None:
          patch("scripts.lcu.apps.validate_termination_safety", return_value=(True, "ok")), \
          patch("time.sleep"), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}):
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={
+             "sanitized_env_applied": True,
+             "dispatch_identity": failed_new_ident.to_dict(),
+         }):
         with pytest.raises(LCUError) as exc_info:
             open_app("chrome")
         assert exc_info.value.code == "dispatch_failed"
@@ -394,7 +399,10 @@ def test_v3_vscode_failed_launch_rollback() -> None:
          patch("scripts.lcu.apps.validate_termination_safety", return_value=(True, "ok")), \
          patch("time.sleep"), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}):
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={
+             "sanitized_env_applied": True,
+             "dispatch_identity": new_orphan_code.to_dict(),
+         }):
         with pytest.raises(LCUError) as exc_info:
             open_app("vscode")
         assert exc_info.value.code == "dispatch_failed"

@@ -55,10 +55,9 @@ def test_launch_context_reports_selected_env_and_path_hash_only() -> None:
 
     snapshot = get_launch_context_snapshot(source)
 
-    assert snapshot["environment"] == {
-        "ELECTRON_RUN_AS_NODE": "1",
-        "SHELL": "/bin/bash",
-    }
+    assert snapshot["environment"]["ELECTRON_RUN_AS_NODE"]["value"] == "1"
+    assert snapshot["environment"]["SHELL"]["present"] is True
+    assert "/bin/bash" not in json.dumps(snapshot["environment"])
     assert snapshot["path"]["sha256"]
     assert "PATH" not in snapshot["environment"]
     assert "UNRELATED_SECRET" not in json.dumps(snapshot)
@@ -166,7 +165,10 @@ def test_staged_wait_uses_grace_when_new_process_is_alive() -> None:
         side_effect=[{}, {}, {101: identity}, {101: identity}],
     ), patch(
         "scripts.lcu.apps.dispatch_candidate",
-        return_value={"sanitized_env_applied": True},
+        return_value={
+            "sanitized_env_applied": True,
+            "dispatch_identity": identity.to_dict(),
+        },
     ), patch(
         "scripts.lcu.apps._poll_for_launched_window",
         side_effect=[None, detected],
@@ -193,6 +195,7 @@ def test_process_ownership_ledger_revalidates_and_finds_window(tmp_path: Path) -
         session_id=1,
     ).to_dict()
     process["cleanup_mode"] = "owned-after-close"
+    process["ownership_evidence"] = "exact-dispatch-identity"
 
     with patch("scripts.lcu.ownership.get_ledger_path", return_value=ledger_path), patch(
         "scripts.lcu.ownership.is_same_process", return_value=True

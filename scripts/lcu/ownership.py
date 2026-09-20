@@ -10,6 +10,7 @@ from .processes import ProcessIdentity, is_same_process
 
 
 LEDGER_VERSION = 1
+TERMINATION_EVIDENCE = {"exact-dispatch-identity"}
 
 
 def get_ledger_path() -> Path:
@@ -63,10 +64,17 @@ def load_owned_processes(prune: bool = True) -> list[dict[str, Any]]:
         if identity.creation_time is None:
             continue
         try:
-            if is_same_process(identity):
-                valid.append(record)
+            same = is_same_process(identity)
         except Exception:
-            continue
+            same = None
+        if same is True:
+            recovered = dict(record)
+            recovered.pop("validation_status", None)
+            valid.append(recovered)
+        elif same is None:
+            preserved = dict(record)
+            preserved["validation_status"] = "unknown"
+            valid.append(preserved)
     if prune and valid != raw_records:
         try:
             _write_records(valid)
@@ -112,8 +120,43 @@ def owned_processes_for_window(hwnd: int, window_pid: int | None = None) -> list
             continue
         if window_pid is not None and record.get("window_pid") != window_pid:
             continue
+        if record.get("validation_status") == "unknown":
+            continue
+        if record.get("ownership_evidence") not in TERMINATION_EVIDENCE:
+            continue
         matched.append(record)
     return matched
+
+
+def authorize_owned_processes(
+    hwnd: int,
+    window_pid: int | None,
+    candidates: Iterable[dict[str, Any] | ProcessIdentity],
+) -> list[dict[str, Any]]:
+    """Intersect caller data with live, ledger-backed ownership evidence."""
+
+    authorized = owned_processes_for_window(hwnd=hwnd, window_pid=window_pid)
+    keys = {
+        (int(record["pid"]), int(record["creation_time"])): record
+        for record in authorized
+        if record.get("creation_time") is not None
+    }
+    result: list[dict[str, Any]] = []
+    for candidate in candidates:
+        try:
+            identity = (
+                candidate
+                if isinstance(candidate, ProcessIdentity)
+                else ProcessIdentity.from_dict(candidate)
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if identity.creation_time is None:
+            continue
+        record = keys.get((identity.pid, identity.creation_time))
+        if record is not None:
+            result.append(record)
+    return result
 
 
 def forget_owned_processes(processes: Iterable[ProcessIdentity | dict[str, Any]]) -> None:

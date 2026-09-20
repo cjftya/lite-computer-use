@@ -19,6 +19,8 @@ from .launch_context import build_gui_launch_env, get_gui_env_normalization, get
 from .ownership import load_owned_processes, remember_owned_processes
 from .processes import (
     ProcessIdentity,
+    get_process_identity,
+    snapshot_is_complete,
     snapshot_processes,
     terminate_process,
     validate_termination_safety,
@@ -318,10 +320,18 @@ def dispatch_candidate(candidate: LaunchCandidate) -> dict[str, Any]:
     else:
         cmd = [resolved, *candidate.args]
     process = subprocess.Popen(cmd, **common_kwargs)
+    pid = getattr(process, "pid", None)
+    dispatch_identity = None
+    if os.name == "nt" and isinstance(pid, int):
+        identity = get_process_identity(pid)
+        if identity is not None:
+            dispatch_identity = identity.to_dict()
     return {
         "launch_type": "normalized-process",
         "sanitized_env_applied": True,
-        "pid": getattr(process, "pid", None),
+        "gui_env_normalization": get_gui_env_normalization(applied=True),
+        "pid": pid,
+        "dispatch_identity": dispatch_identity,
         "resolved": resolved,
     }
 
@@ -870,9 +880,11 @@ def open_app(
     try:
         baseline_processes = snapshot_processes()
         baseline_pids = set(baseline_processes.keys())
+        baseline_trusted = snapshot_is_complete(baseline_processes)
     except Exception:
         baseline_processes = {}
         baseline_pids = set()
+        baseline_trusted = False
 
     try:
         all_before = list_windows()
@@ -891,6 +903,9 @@ def open_app(
     rollback_count = 0
     dispatch_ms = 0.0
     sanitized_env_applied = False
+    safety_warnings: list[str] = []
+    if not baseline_trusted:
+        safety_warnings.append("baseline_process_snapshot_untrusted: ownership and rollback disabled")
 
     for candidate in entry.candidates:
         family = candidate_launch_family(candidate)
@@ -903,9 +918,11 @@ def open_app(
         try:
             before_cand_processes = snapshot_processes()
             before_cand_pids = set(before_cand_processes.keys())
+            before_cand_trusted = snapshot_is_complete(before_cand_processes)
         except Exception:
             before_cand_processes = baseline_processes
             before_cand_pids = set(baseline_pids)
+            before_cand_trusted = False
 
         try:
             dispatch_started_at = time.monotonic()
@@ -914,12 +931,22 @@ def open_app(
             sanitized_env_applied = sanitized_env_applied or bool(
                 dispatch_info.get("sanitized_env_applied")
             )
+            raw_dispatch_identity = dispatch_info.get("dispatch_identity")
+            try:
+                dispatch_identity = (
+                    ProcessIdentity.from_dict(raw_dispatch_identity)
+                    if isinstance(raw_dispatch_identity, dict)
+                    else None
+                )
+            except (KeyError, TypeError, ValueError):
+                dispatch_identity = None
         except Exception as exc:
             attempts.append(
                 {
                     "method": candidate.method,
                     "target": candidate.target,
-                    "result": f"dispatch_error: {exc}",
+                    "result": "dispatch_error",
+                    "error_type": type(exc).__name__,
                 }
             )
             continue
@@ -933,12 +960,13 @@ def open_app(
                 latest_processes = snapshot_processes()
             except Exception:
                 latest_processes = {}
-            new_identities = [
-                identity
-                for pid, identity in latest_processes.items()
-                if pid not in before_cand_pids and pid not in baseline_pids
-            ]
-            if new_identities:
+            dispatcher_alive = bool(
+                dispatch_identity is not None
+                and dispatch_identity.pid in latest_processes
+                and latest_processes[dispatch_identity.pid].creation_time
+                == dispatch_identity.creation_time
+            )
+            if dispatcher_alive:
                 grace_timeout = max(0.0, APP_WINDOW_GRACE_TIMEOUT - APP_WINDOW_FAST_TIMEOUT)
                 detected_win = _poll_for_launched_window(entry, before_hwnds, grace_timeout)
 
@@ -970,27 +998,28 @@ def open_app(
             owned_processes: list[dict[str, Any]] = []
 
             # Only track owned processes if NOT reusing an existing window and window PID is not a baseline process
-            if not is_reused and (win_pid is None or win_pid not in baseline_pids):
+            if (
+                baseline_trusted
+                and before_cand_trusted
+                and not is_reused
+                and dispatch_identity is not None
+                and dispatch_identity.creation_time is not None
+                and dispatch_identity.session_id is not None
+                and (win_pid is None or win_pid not in baseline_pids)
+            ):
                 try:
                     after_processes = snapshot_processes()
                 except Exception:
                     after_processes = {}
-
-                cand_new_pids = (set(after_processes.keys()) - before_cand_pids) - baseline_pids
-
-                allowed_names = expected_process_names or ([win_proc] if win_proc else [])
-                if not allowed_names and candidate.target.endswith(".exe"):
-                    allowed_names = [ntpath.basename(candidate.target).lower()]
-
-                for pid in sorted(cand_new_pids):
-                    p_ident = after_processes.get(pid)
-                    if not p_ident:
-                        continue
-                    if allowed_names:
-                        if not any(p_ident.process_name.lower() == a.lower() for a in allowed_names):
-                            continue
-                    p_dict = p_ident.to_dict()
+                live_dispatcher = after_processes.get(dispatch_identity.pid)
+                if (
+                    snapshot_is_complete(after_processes)
+                    and live_dispatcher is not None
+                    and live_dispatcher.creation_time == dispatch_identity.creation_time
+                ):
+                    p_dict = dispatch_identity.to_dict()
                     p_dict["cleanup_mode"] = success_cleanup
+                    p_dict["ownership_evidence"] = "exact-dispatch-identity"
                     owned_processes.append(p_dict)
 
             successful_result = {
@@ -1023,31 +1052,38 @@ def open_app(
                     "rollback_count": rollback_count,
                     "launch_context": get_launch_context_snapshot(),
                     "sanitized_env_applied": sanitized_env_applied,
-                    "gui_env_normalization": get_gui_env_normalization(),
+                    "gui_env_normalization": get_gui_env_normalization(
+                        applied=sanitized_env_applied
+                    ),
+                    "safety_warnings": safety_warnings,
                 }
             break
         else:
             # Rollback only after both staged wait periods have expired.
             rollback_pids: list[int] = []
-            if failure_cleanup == "rollback-owned":
+            if (
+                failure_cleanup == "rollback-owned"
+                and baseline_trusted
+                and before_cand_trusted
+                and dispatch_identity is not None
+            ):
                 try:
                     after_cand_processes = snapshot_processes()
-                    cand_new_pids = (set(after_cand_processes.keys()) - before_cand_pids) - baseline_pids
                     allowed_names = expected_process_names or [ntpath.basename(candidate.target).lower()]
-
-                    for pid in sorted(cand_new_pids):
-                        p_ident = after_cand_processes.get(pid)
-                        if not p_ident:
-                            continue
+                    p_ident = after_cand_processes.get(dispatch_identity.pid)
+                    if (
+                        snapshot_is_complete(after_cand_processes)
+                        and p_ident is not None
+                        and p_ident.creation_time == dispatch_identity.creation_time
+                    ):
                         safe, reason = validate_termination_safety(
-                            identity=p_ident,
+                            identity=dispatch_identity,
                             baseline_pids=baseline_pids,
                             allowed_process_names=allowed_names,
                         )
-                        if safe:
-                            if terminate_process(p_ident):
-                                rollback_pids.append(pid)
-                                rollback_count += 1
+                        if safe and terminate_process(dispatch_identity):
+                            rollback_pids.append(dispatch_identity.pid)
+                            rollback_count += 1
                 except Exception:
                     pass
 
