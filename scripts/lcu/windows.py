@@ -312,6 +312,17 @@ def close_window(
     target = find_target_window(query=query, hwnd=hwnd)
     target_hwnd = target["hwnd"]
 
+    if owned_processes is None and cleanup_owned_processes:
+        try:
+            from .ownership import owned_processes_for_window
+
+            owned_processes = owned_processes_for_window(
+                hwnd=target_hwnd,
+                window_pid=target.get("pid"),
+            )
+        except Exception:
+            owned_processes = None
+
     # Post WM_CLOSE message
     win32gui.PostMessage(target_hwnd, win32con.WM_CLOSE, 0, 0)
 
@@ -368,7 +379,7 @@ def close_window(
                 parsed_identities.append(p)
             elif isinstance(p, dict):
                 mode = p.get("cleanup_mode")
-                if mode == "rollback-on-failure":
+                if mode is not None and mode != "owned-after-close":
                     continue
                 parsed_identities.append(ProcessIdentity.from_dict(p))
 
@@ -391,6 +402,15 @@ def close_window(
                 if safe:
                     if terminate_process(p, timeout=2.0):
                         cleaned_processes.append(p.pid)
+
+            released = [p for p in parsed_identities if not is_process_alive(p)]
+            if released:
+                try:
+                    from .ownership import forget_owned_processes
+
+                    forget_owned_processes(released)
+                except Exception:
+                    pass
 
     res: dict[str, Any] = {"hwnd": target_hwnd, "title": target["title"], "closed": True}
     if cleaned_processes:

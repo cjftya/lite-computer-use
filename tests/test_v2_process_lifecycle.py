@@ -177,6 +177,34 @@ def test_n2_notepad_cleanup_terminates_lingering_owned_process() -> None:
         mock_terminate.assert_called_once()
 
 
+def test_n2b_close_window_recovers_owned_processes_from_ledger() -> None:
+    """A later CLI invocation can recover exact HWND/PID-bound ownership metadata."""
+    notepad_ident = ProcessIdentity(
+        pid=101,
+        parent_pid=1,
+        process_name="Notepad.exe",
+        image_path=r"C:\Windows\System32\notepad.exe",
+        creation_time=7654321,
+        session_id=1,
+    )
+    owned = notepad_ident.to_dict()
+    owned["cleanup_mode"] = "owned-after-close"
+    target = {"hwnd": 7773, "title": "Untitled - Notepad", "process": "Notepad.exe", "pid": 101}
+
+    with patch("scripts.lcu.windows.find_target_window", return_value=target), \
+         patch("scripts.lcu.ownership.owned_processes_for_window", return_value=[owned]) as lookup, \
+         patch("scripts.lcu.ownership.forget_owned_processes") as forget, \
+         patch("win32gui.PostMessage"), \
+         patch("win32gui.IsWindow", return_value=0), \
+         patch("scripts.lcu.processes.is_process_alive", return_value=False), \
+         patch("os.name", "nt"):
+        result = close_window(hwnd=7773)
+
+    assert result["closed"] is True
+    lookup.assert_called_once_with(hwnd=7773, window_pid=101)
+    forget.assert_called_once()
+
+
 def test_n3_existing_notepad_preserved() -> None:
     """N3: BEFORE: Notepad PID 200 + visible HWND -> open_app notepad -> reused_existing=true, owned_processes=[]"""
     entry = AppEntry(
@@ -238,15 +266,11 @@ def test_c1_c2_chrome_new_window_with_background_baseline() -> None:
          patch("scripts.lcu.apps.snapshot_processes", return_value={5555: bg_chrome_ident}), \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 8881, "title": "Google Chrome"}), \
-         patch("scripts.lcu.apps.resolve_executable", return_value=r"C:\Program Files\Google\Chrome\Application\chrome.exe"), \
-         patch("subprocess.Popen") as mock_popen, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
          patch("os.name", "nt"):
         res = open_app("chrome")
         # Priority 0 candidate dispatched with --new-window
-        mock_popen.assert_called_once()
-        cmd_args = mock_popen.call_args[0][0]
-        assert "--new-window" in cmd_args
-        assert "about:blank" in cmd_args
+        mock_dispatch.assert_called_once_with(chrome_cmd)
 
         # C1: visible window found
         assert res["hwnd"] == 8881
@@ -289,6 +313,7 @@ def test_c4_chrome_failed_launch_rollback() -> None:
          patch("scripts.lcu.apps.snapshot_processes", side_effect=[
              {5555: baseline_ident},  # baseline
              {5555: baseline_ident},  # before candidate
+             {5555: baseline_ident, 6666: failed_new_ident},  # staged-wait liveness
              {5555: baseline_ident, 6666: failed_new_ident},  # after candidate failure
          ]), \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
@@ -296,7 +321,7 @@ def test_c4_chrome_failed_launch_rollback() -> None:
          patch("scripts.lcu.apps.validate_termination_safety", return_value=(True, "ok")), \
          patch("time.sleep"), \
          patch("os.name", "nt"), \
-         patch("os.startfile"):
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}):
         with pytest.raises(LCUError) as exc_info:
             open_app("chrome")
         assert exc_info.value.code == "dispatch_failed"
@@ -333,12 +358,10 @@ def test_v1_v2_vscode_new_window_with_daemon_processes() -> None:
          patch("scripts.lcu.apps.snapshot_processes", return_value={7001: bg_code_ident}), \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 9991, "title": "Welcome - Visual Studio Code"}), \
-         patch("scripts.lcu.apps.resolve_executable", return_value=r"C:\Code\Code.exe"), \
-         patch("subprocess.Popen") as mock_popen, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
          patch("os.name", "nt"):
         res = open_app("vscode")
-        mock_popen.assert_called_once()
-        assert "--new-window" in mock_popen.call_args[0][0]
+        mock_dispatch.assert_called_once_with(code_cand)
         assert res["hwnd"] == 9991
         # Baseline Code PID 7001 must NOT be in owned_processes
         assert res["owned_processes"] == []
@@ -361,16 +384,17 @@ def test_v3_vscode_failed_launch_rollback() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("scripts.lcu.apps.snapshot_processes", side_effect=[
-             {7001: baseline_code},
-             {7001: baseline_code},
-             {7001: baseline_code, 7002: new_orphan_code},
-         ]), \
+            {7001: baseline_code},
+            {7001: baseline_code},
+            {7001: baseline_code, 7002: new_orphan_code},
+            {7001: baseline_code, 7002: new_orphan_code},
+        ]), \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
          patch("scripts.lcu.apps.terminate_process", return_value=True) as mock_terminate, \
          patch("scripts.lcu.apps.validate_termination_safety", return_value=(True, "ok")), \
          patch("time.sleep"), \
          patch("os.name", "nt"), \
-         patch("os.startfile"):
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}):
         with pytest.raises(LCUError) as exc_info:
             open_app("vscode")
         assert exc_info.value.code == "dispatch_failed"

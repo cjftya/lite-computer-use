@@ -65,3 +65,51 @@ py -3.13 tests\run_smoke_tests.py
 - **Screen Region Coordinates**: `screenshot --target screen --region x y w h` always computes coordinates relative to virtual desktop `(0, 0)` regardless of multi-monitor origin offsets.
 - **Cache Boundedness**: Retains at most 50 captures within 24 hours in `%TEMP%\LiteComputerUse\`; older records and image files are purged automatically.
 - **Window Screenshot Limitation**: `screenshot --target window` captures visible screen pixels within window bounds. Use `focus_window` first if window might be obscured.
+## 4. CLI-safe GUI launch parity
+
+These checks require an interactive Windows desktop. Close the target application first
+unless the case explicitly supplies a pre-existing PWA.
+
+### 4.1 Capture the two launch contexts
+
+PowerShell:
+
+```powershell
+py -3.13 scripts\lcu.py launch_context > powershell-launch-context.json
+py -3.13 scripts\lcu.py open_app vscode --debug
+```
+
+Antigravity Bash:
+
+```bash
+py -3.13 scripts/lcu.py launch_context > antigravity-launch-context.json
+py -3.13 scripts/lcu.py open_app vscode --debug
+```
+
+Compare `parent_process`, `session_id`, `window_station`, `desktop`, selected
+`environment`, PATH hash/resolution, and `gui_env_normalization.dropped_keys`. Both app
+commands pass only when `ok=true`, `hwnd` is non-zero, and the window is foreground.
+
+### 4.2 Chrome with GPT PWA already open
+
+Keep the GPT/ChatGPT Chrome PWA open and close ordinary Chrome browser windows. Run
+`open_app chrome` from both shells. The returned title must contain `Google Chrome`; the
+PWA HWND must not be returned, focused, closed, or included in owned cleanup.
+
+### 4.3 Repetition and cleanup
+
+For every iteration, preserve the exact `hwnd`, `reused_existing`, `launch_method`, and
+`owned_processes` returned by `open_app`. Close only a newly launched window:
+
+```powershell
+py -3.13 scripts\lcu.py close_window --hwnd <hwnd> --owned-processes '<exact-json>'
+```
+
+- Notepad: 20 open/close iterations; no matching live entry may remain in
+  `%TEMP%\LiteComputerUse\owned-processes.json`, and no LCU-created Notepad process or
+  visible window may remain.
+- Paint: 5 iterations.
+- Calculator: 5 iterations.
+- Electron: VS Code plus one installed extra Electron application when available.
+
+Never use `taskkill /IM`, `Stop-Process -Name`, or any name-wide cleanup while testing.

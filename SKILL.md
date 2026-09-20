@@ -18,7 +18,7 @@ py -3.13 scripts\lcu.py <tool> [args]
 ## 1. Tool 목록 (Public Tools)
 
 ### Open & Discovery
-- `open_app <name>`: Launch application with priority strategy (AppsFolder -> Start Menu -> URI -> App Paths -> direct exe), verify visible window, and bring to foreground. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and `owned_processes` (tracking newly created processes under process ownership model). Reuses and restores single existing window automatically.
+- `open_app <name> [--debug]`: Launch an application through deduplicated normalized-process / Windows Shell candidates, verify a visible window, and bring it to foreground. Executable launches remove only confirmed CLI-specific Electron/VS Code inheritance variables. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and `owned_processes`. Reuses and restores a single matching existing window automatically.
 - `open_file <absolute-path>`: Open file with default associated application.
 - `open_folder <absolute-path-or-alias>`: Open folder in Explorer (`desktop`, `documents`, `downloads`, `바탕화면`, `문서`, `다운로드`).
 - `open_url <url>`: Open `http://` or `https://` URL in default browser.
@@ -52,6 +52,7 @@ py -3.13 scripts\lcu.py <tool> [args]
 
 ### Diagnostics
 - `doctor`: Check environment, Windows platform, dependencies, and desktop connection.
+- `launch_context`: Report the selected shell/parent/session/desktop environment needed to compare PowerShell and Antigravity without exposing the full environment or PATH.
 
 ---
 
@@ -82,6 +83,8 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 2. **Discovery Tool** (`find_path`, `list_windows`, `focus_window`): 경로 및 창 식별에 우선 사용.
 3. **GUI Vision** (`screenshot` -> `batch`): Direct/Discovery로 해결할 수 없을 때만 최후에 사용.
 - **Direct Tool 성공 정의**: `open_app`은 단순 dispatch 성공이 아니라 검증된 `hwnd`(`MainWindowHandle`) 확보 및 foreground 포커스가 검증되어야 Task 완료로 판정합니다. 단일 기존 창이 존재하면 자동 restore/focus 후 `reused_existing=true`로 완료합니다.
+- **앱 실행 단일 호출**: 앱 실행 요청마다 `open_app <app>`은 정확히 1회만 호출합니다. `dispatch_failed` 뒤에 raw Bash 실행, `Start-Process`, `.lnk` 직접 실행, 동일 `open_app` 재호출을 이어 붙이지 않습니다. 후보 선택, executable-family dedupe, staged wait, rollback은 Python tool layer가 담당합니다.
+- **실패 판정**: `ok=true`와 유효한 `hwnd`가 함께 있어야 성공입니다. `dispatch_failed`이면 `attempts`를 읽고, 동일 실행군이 아닌 구조적으로 다른 복구가 명확할 때에만 전체 Failure Plan 범위 안에서 1회 복구합니다.
 
 ### 2.3 Observation Boundary & Batching
 - **핵심 불변 규칙**:
@@ -118,7 +121,7 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
   2. `reused_existing` 필드가 누락되었거나 `focus_window` 결과 등 소유권이 불명확한 창
   3. 사용자의 최종 결과로 남겨야 하는 창 (예: "메모장에 결과를 적어줘" 요청의 메모장)
   4. 기존 브라우저 창 또는 탭
-  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 이번 launch에서 새로 생성된 것이 입증된 `owned_processes`만 엄격한 안전성 검증(PID reuse 방지, denylist 제외, 타 창 미소유)을 통과한 후 정리됩니다.
+  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 이번 launch에서 새로 생성된 것이 입증된 `owned_processes`만 엄격한 안전성 검증(PID + creation time 재검증, denylist 제외, 타 창 미소유)을 통과한 후 정리됩니다. 소유권은 `%TEMP%\LiteComputerUse\owned-processes.json`에도 최소 정보로 유지되므로 다음 CLI invocation의 `close_window`에서도 같은 검증을 거칩니다.
 - **종료 순서**:
   여러 앱을 실행한 경우 최근에 실행한 앱부터 **역순**으로 닫습니다.
 - **Cleanup 실패 처리**:

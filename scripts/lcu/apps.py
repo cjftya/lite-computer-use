@@ -1,30 +1,33 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from .errors import LCUError
+from .launch_context import build_gui_launch_env, get_gui_env_normalization, get_launch_context_snapshot
+from .ownership import load_owned_processes, remember_owned_processes
 from .processes import (
     ProcessIdentity,
-    is_same_process,
     snapshot_processes,
     terminate_process,
     validate_termination_safety,
 )
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
-APP_INDEX_CACHE_VERSION = 5
-APP_WINDOW_READY_TIMEOUT = 2.5
+APP_INDEX_CACHE_VERSION = 6
+APP_WINDOW_FAST_TIMEOUT = 2.5
+APP_WINDOW_GRACE_TIMEOUT = 8.0
 APP_WINDOW_READY_INTERVAL = 0.1
 
 CANDIDATE_PRIORITY: dict[str, int] = {
@@ -75,6 +78,27 @@ def candidate_priority_key(candidate: LaunchCandidate) -> int:
     if candidate.priority is not None:
         return candidate.priority
     return CANDIDATE_PRIORITY.get(candidate.method, 99)
+
+
+def candidate_launch_family(candidate: LaunchCandidate) -> tuple[str, str]:
+    """Identify structurally equivalent launch candidates.
+
+    Executable wrappers such as ``code.cmd`` and ``code.exe`` intentionally share
+    one family. Shell activation (.lnk, AppsFolder, URI) remains a distinct fallback.
+    """
+
+    target = candidate.target.strip().strip('"')
+    target_lower = target.lower()
+    if candidate.method in {"appsfolder", "uri", "start-menu"}:
+        return candidate.method, target_lower
+    resolved = resolve_executable(target)
+    resolved_clean = resolved.strip().strip('"')
+    basename = ntpath.basename(resolved_clean)
+    stem, suffix = ntpath.splitext(basename)
+    suffix = suffix.lower()
+    if suffix in {".exe", ".cmd", ".bat", ".com"}:
+        return "executable", stem.lower()
+    return candidate.method, resolved.lower()
 
 
 def classify_launch_method(target: str, source: str = "") -> str:
@@ -131,6 +155,7 @@ class AppEntry:
     commands: list[str] = field(default_factory=list)
     candidates: list[LaunchCandidate] = field(default_factory=list)
     process_cleanup: dict[str, Any] = field(default_factory=dict)
+    window_match: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.commands:
@@ -147,12 +172,12 @@ class AppEntry:
         self.sort_and_deduplicate_candidates()
 
     def sort_and_deduplicate_candidates(self) -> None:
-        seen_keys: set[tuple[str, tuple[str, ...]]] = set()
+        seen_keys: set[tuple[str, str]] = set()
         unique_candidates: list[LaunchCandidate] = []
 
         sorted_cands = sorted(self.candidates, key=candidate_priority_key)
         for cand in sorted_cands:
-            norm_key = (cand.target.strip().lower(), tuple(cand.args))
+            norm_key = candidate_launch_family(cand)
             if norm_key not in seen_keys:
                 seen_keys.add(norm_key)
                 unique_candidates.append(cand)
@@ -174,6 +199,8 @@ class AppEntry:
         }
         if self.process_cleanup:
             d["process_cleanup"] = self.process_cleanup
+        if self.window_match:
+            d["window_match"] = self.window_match
         return d
 
     @classmethod
@@ -201,6 +228,7 @@ class AppEntry:
             commands=d.get("commands", [d["target"]]),
             candidates=candidates,
             process_cleanup=d.get("process_cleanup", {}),
+            window_match=d.get("window_match", {}),
         )
 
 
@@ -209,6 +237,7 @@ def merge_app_entries(primary: AppEntry, secondary: AppEntry) -> AppEntry:
     merged_aliases = list(dict.fromkeys(primary.aliases + secondary.aliases))
     merged_candidates = list(primary.candidates) + list(secondary.candidates)
     proc_cleanup = primary.process_cleanup or secondary.process_cleanup
+    window_match = primary.window_match or secondary.window_match
     return AppEntry(
         name=primary.name,
         target=primary.target,
@@ -217,6 +246,7 @@ def merge_app_entries(primary: AppEntry, secondary: AppEntry) -> AppEntry:
         normalized=primary.normalized,
         candidates=merged_candidates,
         process_cleanup=proc_cleanup,
+        window_match=window_match,
     )
 
 
@@ -249,31 +279,87 @@ def resolve_executable(target: str) -> str:
     return target_clean
 
 
-def dispatch_candidate(candidate: LaunchCandidate) -> None:
-    if candidate.args:
-        resolved = resolve_executable(candidate.target)
-        resolved_lower = resolved.lower()
-        if resolved_lower.endswith(".cmd") or resolved_lower.endswith(".bat"):
-            cmd = ["cmd.exe", "/d", "/s", "/c", resolved, *candidate.args]
-            subprocess.Popen(cmd, shell=False)
-        else:
-            subprocess.Popen([resolved, *candidate.args], shell=False)
+def _launch_cwd(resolved: str, env: dict[str, str]) -> str:
+    resolved_clean = resolved.strip().strip('"')
+    if os.path.isfile(resolved_clean):
+        return os.path.dirname(os.path.abspath(resolved_clean))
+    user_profile = env.get("USERPROFILE")
+    if user_profile and os.path.isdir(user_profile):
+        return user_profile
+    return os.path.expanduser("~")
+
+
+def dispatch_candidate(candidate: LaunchCandidate) -> dict[str, Any]:
+    """Dispatch one candidate without inheriting CLI-specific Electron state."""
+
+    if candidate.method in {"appsfolder", "start-menu", "uri"}:
+        if os.name != "nt":
+            raise OSError(f"Windows Shell activation is unavailable for {candidate.method}")
+        os.startfile(candidate.target)
+        return {
+            "launch_type": "windows-shell",
+            "sanitized_env_applied": False,
+            "pid": None,
+        }
+
+    resolved = resolve_executable(candidate.target)
+    env = build_gui_launch_env()
+    common_kwargs: dict[str, Any] = {
+        "shell": False,
+        "env": env,
+        "cwd": _launch_cwd(resolved, env),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    resolved_lower = resolved.lower()
+    if resolved_lower.endswith((".cmd", ".bat")):
+        cmd = ["cmd.exe", "/d", "/s", "/c", resolved, *candidate.args]
     else:
-        if os.name == "nt":
-            os.startfile(candidate.target)
-        else:
-            subprocess.Popen(candidate.target, shell=True)
+        cmd = [resolved, *candidate.args]
+    process = subprocess.Popen(cmd, **common_kwargs)
+    return {
+        "launch_type": "normalized-process",
+        "sanitized_env_applied": True,
+        "pid": getattr(process, "pid", None),
+        "resolved": resolved,
+    }
 
 
 def is_matching_window(win: dict[str, Any], entry: AppEntry) -> bool:
     title = win.get("title", "").strip().lower()
     proc = win.get("process", "").strip().lower()
 
+    configured_match = entry.window_match
+    if configured_match:
+        process_names = {
+            str(name).strip().lower()
+            for name in configured_match.get("process_names", [])
+            if str(name).strip()
+        }
+        title_contains_any = [
+            str(value).strip().lower()
+            for value in configured_match.get("title_contains_any", [])
+            if str(value).strip()
+        ]
+        title_equals_any = {
+            str(value).strip().lower()
+            for value in configured_match.get("title_equals_any", [])
+            if str(value).strip()
+        }
+        if process_names and proc not in process_names:
+            return False
+        if title_contains_any and not any(value in title for value in title_contains_any):
+            return False
+        if title_equals_any and title not in title_equals_any:
+            return False
+        return bool(process_names or title_contains_any or title_equals_any)
+
     known_exes = set()
     for cand in entry.candidates:
         t = cand.target.strip().lower()
         if t.endswith(".exe"):
-            known_exes.add(Path(t).name.lower())
+            known_exes.add(ntpath.basename(t).lower())
     if not known_exes:
         known_exes.add(f"{entry.normalized}.exe")
         known_exes.add(f"{entry.name.lower()}.exe")
@@ -325,7 +411,7 @@ def find_matching_windows(
 
 def _wait_for_visible_app_window(
     entry: AppEntry,
-    timeout: float = APP_WINDOW_READY_TIMEOUT,
+    timeout: float = APP_WINDOW_FAST_TIMEOUT,
     interval: float = APP_WINDOW_READY_INTERVAL,
 ) -> bool:
     if os.name != "nt":
@@ -392,6 +478,7 @@ def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
             if not raw_cmds:
                 continue
             proc_cleanup = app_info.get("process_cleanup", {})
+            window_match = app_info.get("window_match", {})
 
             candidates: list[LaunchCandidate] = []
             command_strings: list[str] = []
@@ -440,6 +527,7 @@ def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
                     commands=command_strings,
                     candidates=candidates,
                     process_cleanup=proc_cleanup,
+                    window_match=window_match,
                 )
             )
     return entries
@@ -641,12 +729,91 @@ def find_app_entry(query: str, index: list[AppEntry]) -> tuple[AppEntry | None, 
     return None, []
 
 
-def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
+def _cleanup_policies(entry: AppEntry) -> tuple[str, str]:
+    cleanup = entry.process_cleanup
+    if "success" in cleanup or "failure" in cleanup:
+        return str(cleanup.get("success", "window-only")), str(cleanup.get("failure", "none"))
+    legacy_mode = str(cleanup.get("mode", "none"))
+    success = "owned-after-close" if legacy_mode == "owned-after-close" else "window-only"
+    failure = "rollback-owned" if legacy_mode in {"rollback-on-failure", "owned-after-close"} else "none"
+    return success, failure
+
+
+def _detect_launched_window(
+    entry: AppEntry,
+    before_hwnds: set[int],
+) -> dict[str, Any] | None:
+    from .windows import list_windows
+
+    current_windows = list_windows()
+    new_matching = [
+        window
+        for window in current_windows
+        if window.get("hwnd", 0) not in before_hwnds and is_matching_window(window, entry)
+    ]
+    if new_matching:
+        return next((window for window in new_matching if window.get("active")), new_matching[0])
+
+    active_matching = next(
+        (
+            window
+            for window in current_windows
+            if window.get("active") and is_matching_window(window, entry)
+        ),
+        None,
+    )
+    if active_matching:
+        return active_matching
+
+    matching_all = [window for window in current_windows if is_matching_window(window, entry)]
+    if matching_all and not any(window.get("hwnd", 0) in before_hwnds for window in matching_all):
+        return matching_all[0]
+    return None
+
+
+def _poll_for_launched_window(
+    entry: AppEntry,
+    before_hwnds: set[int],
+    timeout: float,
+) -> dict[str, Any] | None:
+    max_checks = (
+        max(1, int(round(timeout / APP_WINDOW_READY_INTERVAL)) + 1)
+        if APP_WINDOW_READY_INTERVAL > 0
+        else 1
+    )
+    deadline = time.monotonic() + timeout
+    for check in range(max_checks):
+        try:
+            detected = _detect_launched_window(entry, before_hwnds)
+            if detected is not None:
+                return detected
+        except Exception:
+            pass
+        if check + 1 >= max_checks or time.monotonic() >= deadline:
+            break
+        if APP_WINDOW_READY_INTERVAL > 0:
+            time.sleep(APP_WINDOW_READY_INTERVAL)
+    return None
+
+
+def open_app(
+    name: str,
+    config_path: Path | None = None,
+    debug: bool = False,
+) -> dict[str, Any]:
     if not name or not name.strip():
         raise LCUError("invalid_arguments", "Application name cannot be empty")
 
+    started_at = time.monotonic()
+    try:
+        load_owned_processes(prune=True)
+    except Exception:
+        pass
+
+    resolve_started_at = time.monotonic()
     index = build_app_index(config_path)
     entry, candidates = find_app_entry(name.strip(), index)
+    resolve_ms = round((time.monotonic() - resolve_started_at) * 1000, 1)
 
     if candidates:
         raise LCUError(
@@ -673,7 +840,7 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
             focus_window(hwnd=target_win.get("hwnd"))
             win_pid = target_win.get("pid")
             win_proc = target_win.get("process", "")
-            return {
+            result = {
                 "app": entry.name,
                 "target": None,
                 "launch_method": "existing-window",
@@ -684,6 +851,17 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                 "window_process": win_proc,
                 "owned_processes": [],
             }
+            if debug:
+                result["debug"] = {
+                    "resolve_ms": resolve_ms,
+                    "dispatch_ms": 0.0,
+                    "window_ready_ms": 0.0,
+                    "candidate_count": 0,
+                    "rollback_count": 0,
+                    "launch_context": get_launch_context_snapshot(),
+                    "sanitized_env_applied": False,
+                }
+            return result
         except Exception:
             # If focusing existing window fails (e.g. was closing), proceed to fresh launch
             pass
@@ -706,10 +884,21 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     successful_result: dict[str, Any] | None = None
 
-    cleanup_mode = entry.process_cleanup.get("mode", "none")
+    success_cleanup, failure_cleanup = _cleanup_policies(entry)
     expected_process_names = entry.process_cleanup.get("process_names", [])
+    dispatched_families: set[tuple[str, str]] = set()
+    candidate_count = 0
+    rollback_count = 0
+    dispatch_ms = 0.0
+    sanitized_env_applied = False
 
     for candidate in entry.candidates:
+        family = candidate_launch_family(candidate)
+        if family in dispatched_families:
+            continue
+        dispatched_families.add(family)
+        candidate_count += 1
+
         # Per-attempt process snapshot BEFORE dispatch
         try:
             before_cand_processes = snapshot_processes()
@@ -719,7 +908,12 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
             before_cand_pids = set(baseline_pids)
 
         try:
-            dispatch_candidate(candidate)
+            dispatch_started_at = time.monotonic()
+            dispatch_info = dispatch_candidate(candidate)
+            dispatch_ms += (time.monotonic() - dispatch_started_at) * 1000
+            sanitized_env_applied = sanitized_env_applied or bool(
+                dispatch_info.get("sanitized_env_applied")
+            )
         except Exception as exc:
             attempts.append(
                 {
@@ -730,60 +924,23 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
             )
             continue
 
-        # Polling for visible window
-        t_end = time.time() + APP_WINDOW_READY_TIMEOUT
-        max_checks = (
-            max(1, int(round(APP_WINDOW_READY_TIMEOUT / APP_WINDOW_READY_INTERVAL)) + 1)
-            if APP_WINDOW_READY_INTERVAL > 0
-            else 1
-        )
-        checks = 0
-        detected_win: dict[str, Any] | None = None
+        window_wait_started_at = time.monotonic()
+        detected_win = _poll_for_launched_window(entry, before_hwnds, APP_WINDOW_FAST_TIMEOUT)
+        latest_processes: dict[int, ProcessIdentity] | None = None
 
-        while checks < max_checks:
+        if detected_win is None:
             try:
-                current_windows = list_windows()
-
-                # 1. Check for newly created window matching entry
-                new_matching = [
-                    w
-                    for w in current_windows
-                    if w.get("hwnd", 0) not in before_hwnds and is_matching_window(w, entry)
-                ]
-                if len(new_matching) == 1:
-                    detected_win = new_matching[0]
-                    break
-                elif len(new_matching) > 1:
-                    active_new = next((w for w in new_matching if w.get("active")), new_matching[0])
-                    detected_win = active_new
-                    break
-
-                # 2. Check if an existing matching window became active/foreground
-                active_matching = next(
-                    (
-                        w
-                        for w in current_windows
-                        if w.get("active") and is_matching_window(w, entry)
-                    ),
-                    None,
-                )
-                if active_matching:
-                    detected_win = active_matching
-                    break
-
-                # 3. If before_hwnds had no matching windows, any matching window counts
-                matching_all = [w for w in current_windows if is_matching_window(w, entry)]
-                if matching_all and not any(w.get("hwnd", 0) in before_hwnds for w in matching_all):
-                    detected_win = matching_all[0]
-                    break
+                latest_processes = snapshot_processes()
             except Exception:
-                pass
-
-            checks += 1
-            if time.time() >= t_end or checks >= max_checks:
-                break
-            if APP_WINDOW_READY_INTERVAL > 0:
-                time.sleep(APP_WINDOW_READY_INTERVAL)
+                latest_processes = {}
+            new_identities = [
+                identity
+                for pid, identity in latest_processes.items()
+                if pid not in before_cand_pids and pid not in baseline_pids
+            ]
+            if new_identities:
+                grace_timeout = max(0.0, APP_WINDOW_GRACE_TIMEOUT - APP_WINDOW_FAST_TIMEOUT)
+                detected_win = _poll_for_launched_window(entry, before_hwnds, grace_timeout)
 
         if detected_win is not None:
             detected_hwnd = detected_win.get("hwnd", 0)
@@ -823,7 +980,7 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
 
                 allowed_names = expected_process_names or ([win_proc] if win_proc else [])
                 if not allowed_names and candidate.target.endswith(".exe"):
-                    allowed_names = [Path(candidate.target).name.lower()]
+                    allowed_names = [ntpath.basename(candidate.target).lower()]
 
                 for pid in sorted(cand_new_pids):
                     p_ident = after_processes.get(pid)
@@ -833,7 +990,7 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                         if not any(p_ident.process_name.lower() == a.lower() for a in allowed_names):
                             continue
                     p_dict = p_ident.to_dict()
-                    p_dict["cleanup_mode"] = cleanup_mode
+                    p_dict["cleanup_mode"] = success_cleanup
                     owned_processes.append(p_dict)
 
             successful_result = {
@@ -847,15 +1004,36 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                 "window_process": win_proc,
                 "owned_processes": owned_processes,
             }
+            try:
+                remember_owned_processes(
+                    app=entry.name,
+                    hwnd=int(detected_hwnd),
+                    window_pid=int(win_pid) if win_pid is not None else None,
+                    owned_processes=owned_processes,
+                )
+            except Exception:
+                pass
+            if debug:
+                successful_result["debug"] = {
+                    "resolve_ms": resolve_ms,
+                    "dispatch_ms": round(dispatch_ms, 1),
+                    "window_ready_ms": round((time.monotonic() - window_wait_started_at) * 1000, 1),
+                    "total_ms": round((time.monotonic() - started_at) * 1000, 1),
+                    "candidate_count": candidate_count,
+                    "rollback_count": rollback_count,
+                    "launch_context": get_launch_context_snapshot(),
+                    "sanitized_env_applied": sanitized_env_applied,
+                    "gui_env_normalization": get_gui_env_normalization(),
+                }
             break
         else:
-            # Candidate failed to produce a visible window -> Rollback on failure!
+            # Rollback only after both staged wait periods have expired.
             rollback_pids: list[int] = []
-            if cleanup_mode in ("rollback-on-failure", "owned-after-close"):
+            if failure_cleanup == "rollback-owned":
                 try:
                     after_cand_processes = snapshot_processes()
                     cand_new_pids = (set(after_cand_processes.keys()) - before_cand_pids) - baseline_pids
-                    allowed_names = expected_process_names or [Path(candidate.target).name.lower()]
+                    allowed_names = expected_process_names or [ntpath.basename(candidate.target).lower()]
 
                     for pid in sorted(cand_new_pids):
                         p_ident = after_cand_processes.get(pid)
@@ -869,6 +1047,7 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                         if safe:
                             if terminate_process(p_ident):
                                 rollback_pids.append(pid)
+                                rollback_count += 1
                 except Exception:
                     pass
 
@@ -878,6 +1057,7 @@ def open_app(name: str, config_path: Path | None = None) -> dict[str, Any]:
                     "target": candidate.target,
                     "result": "no_visible_window",
                     "rolled_back_pids": rollback_pids,
+                    "window_wait_ms": round((time.monotonic() - window_wait_started_at) * 1000, 1),
                 }
             )
 

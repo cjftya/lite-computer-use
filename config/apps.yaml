@@ -7,9 +7,15 @@ apps:
         priority: 0
       - chrome.exe
     process_cleanup:
-      mode: rollback-on-failure
+      success: window-only
+      failure: rollback-owned
       process_names:
         - chrome.exe
+    window_match:
+      process_names:
+        - chrome.exe
+      title_contains_any:
+        - Google Chrome
 
   edge:
     aliases: [edge, microsoft edge, 엣지, 마이크로소프트 엣지]
@@ -25,7 +31,8 @@ apps:
       - "shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
       - notepad.exe
     process_cleanup:
-      mode: owned-after-close
+      success: owned-after-close
+      failure: rollback-owned
       process_names:
         - Notepad.exe
 
@@ -71,7 +78,8 @@ apps:
       - code.exe
       - code.cmd
     process_cleanup:
-      mode: rollback-on-failure
+      success: window-only
+      failure: rollback-owned
       process_names:
         - Code.exe
 

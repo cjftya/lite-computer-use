@@ -69,11 +69,14 @@ All tools speak standard JSON:
 
 ### 1. Open & Discovery
 ```powershell
-# Launch app by name or alias (AppsFolder -> Start Menu -> URI -> App Paths -> exe, verifies visible window)
+# Launch app by name or alias (deduplicated normalized process / Windows Shell candidates, verifies visible window)
 py -3.13 scripts\lcu.py open_app chrome
 py -3.13 scripts\lcu.py open_app notepad
 py -3.13 scripts\lcu.py open_app 계산기
 py -3.13 scripts\lcu.py open_app paint
+
+# Include timing, candidate count, rollback count, and safe launch diagnostics
+py -3.13 scripts\lcu.py open_app vscode --debug
 
 # Open file with default application (rejects executables/scripts)
 py -3.13 scripts\lcu.py open_file "C:\Users\me\Documents\report.pdf"
@@ -192,6 +195,36 @@ py -3.13 scripts\lcu.py batch '[
 ```powershell
 py -3.13 -m pytest
 ```
+
+### PowerShell / Antigravity launch-context parity
+
+Run the same diagnostic once from PowerShell and once from Antigravity Bash before
+comparing GUI behavior. It reports only selected Electron/VS Code/Node/shell variables,
+a PATH hash, executable resolution, session, window station, and desktop; it never emits
+the complete environment or PATH value.
+
+```powershell
+py -3.13 scripts\lcu.py launch_context > powershell-launch-context.json
+```
+
+```bash
+py -3.13 scripts/lcu.py launch_context > antigravity-launch-context.json
+```
+
+Executable GUI launches receive a copied environment with only
+`ELECTRON_RUN_AS_NODE`, `ELECTRON_NO_ATTACH_CONSOLE`, and `VSCODE_IPC_HOOK_CLI`
+removed. `NODE_OPTIONS` and other variable families remain untouched unless future
+diagnostics prove they are unsafe. Standard input/output/error are detached, and the
+launch working directory is the executable directory or the user profile fallback.
+
+Window readiness uses a 2.5-second fast stage and extends to an 8-second total deadline
+only when the attempt created a live process. Rollback occurs after the final deadline.
+Executable wrappers from the same family (for example `code.exe` and `code.cmd`) are
+attempted once; a structurally different Windows Shell shortcut may remain as fallback.
+
+LCU-owned processes are recorded in `%TEMP%\LiteComputerUse\owned-processes.json`.
+Every later use revalidates PID plus creation time and image/name identity before cleanup.
+The ledger never authorizes process-name-wide termination.
 
 ### Real Windows Smoke Test Suite
 Launches a live Tkinter GUI fixture with known button and canvas targets, captures screenshots across presets, resolves coordinates, tests hits, drags, and batch actions:

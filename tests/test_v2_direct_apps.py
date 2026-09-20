@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -242,7 +242,7 @@ def test_open_app_appsfolder_success() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": False}) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 3345694, "title": "Paint"}) as mock_focus:
         res = open_app("paint")
@@ -254,7 +254,7 @@ def test_open_app_appsfolder_success() -> None:
         assert res["reused_existing"] is False
         mock_focus.assert_called_once_with(hwnd=3345694)
         # Only AppsFolder was dispatched, mspaint.exe was NOT executed
-        mock_start.assert_called_once_with(appsfolder_cmd)
+        mock_dispatch.assert_called_once_with(entry.candidates[0])
 
 
 def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
@@ -281,7 +281,7 @@ def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", side_effect=mock_list), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 556677, "title": "Paint"}) as mock_focus, \
          patch("time.sleep"):
@@ -292,9 +292,7 @@ def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
         assert res["hwnd"] == 556677
         assert res["reused_existing"] is False
         mock_focus.assert_called_once_with(hwnd=556677)
-        assert mock_start.call_count == 2
-        mock_start.assert_any_call(appsfolder_cmd)
-        mock_start.assert_any_call("mspaint.exe")
+        assert mock_dispatch.call_args_list == [call(entry.candidates[0]), call(entry.candidates[1])]
 
 
 def test_open_app_all_candidates_fail() -> None:
@@ -311,13 +309,13 @@ def test_open_app_all_candidates_fail() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
          patch("time.sleep"):
         with pytest.raises(LCUError) as exc_info:
             open_app("paint")
         assert exc_info.value.code == "dispatch_failed"
-        assert mock_start.call_count == 2
+        assert mock_dispatch.call_args_list == [call(entry.candidates[0]), call(entry.candidates[1])]
         assert exc_info.value.attempts is not None
         assert len(exc_info.value.attempts) == 2
         assert exc_info.value.attempts[0]["target"] == appsfolder_cmd
@@ -386,12 +384,12 @@ def test_open_app_multiple_existing_windows_no_arbitrary_focus() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 103, "title": "Chrome Window 3"}) as mock_focus, \
          patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins):
         res = open_app("chrome")
         # Should not have called focus_window prior to launching, but calls focus_window after detecting win3 (hwnd 103)
-        mock_start.assert_called_once_with("chrome.exe")
+        mock_dispatch.assert_called_once_with(entry.candidates[0])
         mock_focus.assert_called_once_with(hwnd=103)
         assert res["hwnd"] == 103
         assert res["reused_existing"] is False
@@ -638,7 +636,7 @@ def test_open_app_new_window_focus_success() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile"), \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}), \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 888111, "title": "Paint"}) as mock_focus:
         res = open_app("paint")
@@ -661,7 +659,7 @@ def test_open_app_new_window_focus_failure_aborts_without_extra_candidates() -> 
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", side_effect=LCUError("window_focus_failed", "Cannot focus window")):
         with pytest.raises(LCUError) as exc_info:
@@ -669,7 +667,7 @@ def test_open_app_new_window_focus_failure_aborts_without_extra_candidates() -> 
         assert exc_info.value.code == "window_focus_failed"
         assert "failed to focus" in exc_info.value.message
         # Crucial check: only primary.exe was started, secondary.exe was NOT started
-        mock_start.assert_called_once_with("primary.exe")
+        mock_dispatch.assert_called_once_with(entry.candidates[0])
 
 
 def test_open_app_single_existing_window_reused_d3() -> None:
@@ -727,19 +725,19 @@ def test_structured_commands_loaded_from_apps_yaml() -> None:
     entries = load_config_apps(config_path)
     chrome_entry = next((e for e in entries if e.name == "chrome"), None)
     assert chrome_entry is not None
-    assert len(chrome_entry.candidates) >= 2
+    assert len(chrome_entry.candidates) == 1
     # First candidate has priority 0 and args --new-window
     first_cand = chrome_entry.candidates[0]
     assert first_cand.target == "chrome.exe"
     assert first_cand.args == ("--new-window", "about:blank")
     assert first_cand.priority == 0
+    assert chrome_entry.window_match["process_names"] == ["chrome.exe"]
+    assert chrome_entry.window_match["title_contains_any"] == ["Google Chrome"]
 
     vscode_entry = next((e for e in entries if e.name == "vscode"), None)
     assert vscode_entry is not None
-    assert len(vscode_entry.candidates) >= 2
+    assert len(vscode_entry.candidates) == 1
     first_code = vscode_entry.candidates[0]
     assert first_code.target == "code.exe"
     assert first_code.args == ("--new-window",)
     assert first_code.priority == 0
-
-

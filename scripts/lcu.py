@@ -13,7 +13,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lcu import apps, batch, capture, direct, errors, windows
+from lcu import apps, batch, capture, direct, errors, launch_context, windows
 from lcu.errors import LCUError, format_error, format_success, output_json
 
 
@@ -79,6 +79,7 @@ def main() -> None:
     # 3.1 Open / Find
     p_open_app = subparsers.add_parser("open_app")
     p_open_app.add_argument("name", help="App name or alias")
+    p_open_app.add_argument("--debug", action="store_true", help="Include launch timing and context diagnostics")
 
     p_open_file = subparsers.add_parser("open_file")
     p_open_file.add_argument("path", help="Absolute path to file")
@@ -198,6 +199,7 @@ def main() -> None:
 
     # Diagnostics
     p_doctor = subparsers.add_parser("doctor")
+    p_launch_context = subparsers.add_parser("launch_context")
 
     # Parse arguments
     try:
@@ -215,8 +217,12 @@ def main() -> None:
                 sys.exit(1)
             return
 
+        elif action == "launch_context":
+            res = launch_context.get_launch_context_snapshot()
+            print(output_json(format_success("launch_context", res)))
+
         elif action == "open_app":
-            res = apps.open_app(args.name)
+            res = apps.open_app(args.name, debug=args.debug)
             print(output_json(format_success("open_app", res)))
 
         elif action == "open_file":
