@@ -7,7 +7,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -32,17 +32,6 @@ class LaunchSpec:
         target = ntpath.normcase(ntpath.normpath(self.target.strip().strip('"')))
         cwd = ntpath.normcase(ntpath.normpath(self.cwd)) if self.cwd else ""
         return (self.kind, target, self.argv, cwd, self.app_id.casefold())
-
-
-def deduplicate_specs(specs: Iterable[LaunchSpec]) -> list[LaunchSpec]:
-    seen: set[tuple[str, str, tuple[str, ...], str, str]] = set()
-    result: list[LaunchSpec] = []
-    for spec in specs:
-        key = spec.identity_key()
-        if key not in seen:
-            seen.add(key)
-            result.append(spec)
-    return result
 
 
 def resolve_config_path(config_path: Path | None = None) -> Path | None:

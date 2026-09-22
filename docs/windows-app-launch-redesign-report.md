@@ -53,6 +53,15 @@ available. File, folder, URL, input, capture, window-close, and batch action sem
 not intentionally changed. Batch remains fail-fast, so a non-ready `open_app` exception
 prevents later input actions.
 
+## Dead-code cleanup
+
+The follow-up cleanup removes the superseded fast/grace wait constants and polling helper,
+the old launched-window detector, the obsolete failure-cleanup/rollback branch metadata,
+the duplicate cwd resolver, unused observer/resolver helpers, and unused module imports.
+Launch-candidate kind/spec conversion is now shared by deduplication and dispatch so the
+two paths cannot drift. Tests that existed only for removed private helpers were deleted;
+the active observer and full launch-spec deduplication remain covered directly.
+
 ## Verification added
 
 `tests/test_v2_app_launch_redesign.py` covers:

@@ -13,13 +13,6 @@ class Observation:
     error: str | None = None
 
 
-def snapshot_windows(list_windows: Callable[[], list[dict[str, Any]]]) -> Observation:
-    try:
-        return Observation("found", candidates=list_windows())
-    except Exception as exc:
-        return Observation("observation_error", error=f"{type(exc).__name__}: {exc}")
-
-
 def observe_window(
     *,
     list_windows: Callable[[], list[dict[str, Any]]],

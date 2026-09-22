@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
-from lcu import apps, batch, capture, direct, errors, windows
+from lcu import apps, batch, capture, direct, windows
 from lcu.capture import capture_screenshot
 from lcu.windows import click, close_window, focus_window, get_clipboard, list_windows, set_window_bounds, type_text, press_key, hotkey
 from lcu.batch import execute_batch

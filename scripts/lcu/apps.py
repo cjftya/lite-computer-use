@@ -29,8 +29,6 @@ from .win_launch import dispatch as dispatch_launch_spec
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
 APP_INDEX_CACHE_VERSION = 7
-APP_WINDOW_FAST_TIMEOUT = 2.5
-APP_WINDOW_GRACE_TIMEOUT = 8.0
 APP_WINDOW_READY_INTERVAL = 0.2
 APP_WINDOW_TIMEOUT = 10.0
 _APP_INDEX_DIAGNOSTICS: dict[str, Any] = {}
@@ -93,15 +91,32 @@ def candidate_priority_key(candidate: LaunchCandidate) -> int:
     return CANDIDATE_PRIORITY.get(candidate.method, 99)
 
 
+def _candidate_kind(candidate: LaunchCandidate) -> str:
+    return {
+        "appsfolder": "packaged",
+        "start-menu": "shortcut",
+        "uri": "uri",
+        "app-paths": "exe",
+        "exe": "cmd-wrapper" if candidate.target.lower().endswith((".cmd", ".bat")) else "exe",
+    }.get(candidate.method, candidate.method)
+
+
+def _candidate_to_launch_spec(candidate: LaunchCandidate, app_id: str = "") -> LaunchSpec:
+    return LaunchSpec(
+        app_id=app_id,
+        kind=_candidate_kind(candidate),
+        target=candidate.target,
+        argv=candidate.args,
+        cwd=candidate.cwd,
+        source=candidate.source,
+        expected_identity=candidate.expected_identity,
+        priority=candidate.priority,
+    )
+
+
 def candidate_launch_family(candidate: LaunchCandidate) -> tuple[Any, ...]:
     """Return the exact launch-spec key (kept under the old public name)."""
-    target = candidate.target.strip().strip('"')
-    normalized_target = os.path.normcase(os.path.normpath(target))
-    normalized_cwd = os.path.normcase(os.path.normpath(candidate.cwd)) if candidate.cwd else ""
-    kind = {
-        "appsfolder": "packaged", "start-menu": "shortcut", "app-paths": "exe"
-    }.get(candidate.method, candidate.method)
-    return (kind, normalized_target, tuple(candidate.args), normalized_cwd)
+    return _candidate_to_launch_spec(candidate).identity_key()
 
 
 def classify_launch_method(target: str, source: str = "") -> str:
@@ -125,10 +140,6 @@ def classify_launch_method(target: str, source: str = "") -> str:
         return "app-paths" if source == "app-paths" else "exe"
 
     return "exe"
-
-
-def _is_packaged_app_command(command: str) -> bool:
-    return command.strip().lower().startswith("shell:appsfolder\\")
 
 
 def normalize_app_name(name: str) -> str:
@@ -288,30 +299,10 @@ def resolve_executable(target: str) -> str:
     return target_clean
 
 
-def _launch_cwd(resolved: str, env: dict[str, str]) -> str:
-    resolved_clean = resolved.strip().strip('"')
-    if os.path.isfile(resolved_clean):
-        return os.path.dirname(os.path.abspath(resolved_clean))
-    user_profile = env.get("USERPROFILE")
-    if user_profile and os.path.isdir(user_profile):
-        return user_profile
-    return os.path.expanduser("~")
-
-
 def dispatch_candidate(candidate: LaunchCandidate) -> dict[str, Any]:
-    kind = {
-        "appsfolder": "packaged",
-        "start-menu": "shortcut",
-        "uri": "uri",
-        "app-paths": "exe",
-        "exe": "cmd-wrapper" if candidate.target.lower().endswith((".cmd", ".bat")) else "exe",
-    }.get(candidate.method, candidate.method)
+    kind = _candidate_kind(candidate)
     resolved = candidate.target if kind in {"packaged", "shortcut", "uri"} else resolve_executable(candidate.target)
-    spec = LaunchSpec(
-        app_id="", kind=kind, target=candidate.target, argv=candidate.args,
-        cwd=candidate.cwd, source=candidate.source,
-        expected_identity=candidate.expected_identity, priority=candidate.priority,
-    )
+    spec = _candidate_to_launch_spec(candidate)
     receipt = dispatch_launch_spec(spec, resolved=resolved)
     result = receipt.to_dict()
     result["launch_type"] = receipt.backend
@@ -405,39 +396,6 @@ def find_matching_windows(
         windows_list = list_windows()
 
     return [w for w in windows_list if is_matching_window(w, entry)]
-
-
-def _wait_for_visible_app_window(
-    entry: AppEntry,
-    timeout: float = APP_WINDOW_FAST_TIMEOUT,
-    interval: float = APP_WINDOW_READY_INTERVAL,
-) -> bool:
-    if os.name != "nt":
-        return True
-    try:
-        from .windows import list_windows
-    except ImportError:
-        return True
-
-    t_end = time.time() + timeout
-    max_checks = max(1, int(round(timeout / interval)) + 1) if interval > 0 else 1
-    checks = 0
-
-    while checks < max_checks:
-        try:
-            wins = list_windows()
-            matching = [w for w in wins if is_matching_window(w, entry)]
-            if matching:
-                return True
-        except Exception:
-            pass
-
-        checks += 1
-        if time.time() >= t_end or checks >= max_checks:
-            break
-        if interval > 0:
-            time.sleep(interval)
-    return False
 
 
 def get_cache_file_path() -> Path:
@@ -767,46 +725,12 @@ def find_app_entry(query: str, index: list[AppEntry]) -> tuple[AppEntry | None, 
     return None, []
 
 
-def _cleanup_policies(entry: AppEntry) -> tuple[str, str]:
+def _success_cleanup_policy(entry: AppEntry) -> str:
     cleanup = entry.process_cleanup
-    if "success" in cleanup or "failure" in cleanup:
-        return str(cleanup.get("success", "window-only")), str(cleanup.get("failure", "none"))
+    if "success" in cleanup:
+        return str(cleanup.get("success", "window-only"))
     legacy_mode = str(cleanup.get("mode", "none"))
-    success = "owned-after-close" if legacy_mode == "owned-after-close" else "window-only"
-    failure = "rollback-owned" if legacy_mode in {"rollback-on-failure", "owned-after-close"} else "none"
-    return success, failure
-
-
-def _detect_launched_window(
-    entry: AppEntry,
-    before_hwnds: set[int],
-) -> dict[str, Any] | None:
-    from .windows import list_windows
-
-    current_windows = list_windows()
-    new_matching = [
-        window
-        for window in current_windows
-        if window.get("hwnd", 0) not in before_hwnds and is_matching_window(window, entry)
-    ]
-    if new_matching:
-        return next((window for window in new_matching if window.get("active")), new_matching[0])
-
-    active_matching = next(
-        (
-            window
-            for window in current_windows
-            if window.get("active") and is_matching_window(window, entry)
-        ),
-        None,
-    )
-    if active_matching:
-        return active_matching
-
-    matching_all = [window for window in current_windows if is_matching_window(window, entry)]
-    if matching_all and not any(window.get("hwnd", 0) in before_hwnds for window in matching_all):
-        return matching_all[0]
-    return None
+    return "owned-after-close" if legacy_mode == "owned-after-close" else "window-only"
 
 
 def _poll_for_launched_window(
@@ -990,7 +914,6 @@ def open_app(
                     "dispatch_ms": 0.0,
                     "window_ready_ms": 0.0,
                     "candidate_count": 0,
-                    "rollback_count": 0,
                     "launch_context": get_launch_context_snapshot(),
                     "sanitized_env_applied": False,
                 }
@@ -1029,10 +952,9 @@ def open_app(
         ) from exc
 
     attempts: list[dict[str, Any]] = []
-    success_cleanup, _failure_cleanup = _cleanup_policies(entry)
+    success_cleanup = _success_cleanup_policy(entry)
     dispatched_families: set[tuple[Any, ...]] = set()
     candidate_count = 0
-    rollback_count = 0
     dispatch_ms = 0.0
     sanitized_env_applied = False
     safety_warnings: list[str] = []
@@ -1208,7 +1130,6 @@ def open_app(
                     "window_ready_ms": round((time.monotonic() - window_wait_started_at) * 1000, 1),
                     "total_ms": round((time.monotonic() - started_at) * 1000, 1),
                     "candidate_count": candidate_count,
-                    "rollback_count": rollback_count,
                     "launch_context": get_launch_context_snapshot(),
                     "sanitized_env_applied": sanitized_env_applied,
                     "gui_env_normalization": get_gui_env_normalization(

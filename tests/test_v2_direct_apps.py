@@ -13,8 +13,6 @@ from scripts.lcu.apps import (
     APP_INDEX_CACHE_VERSION,
     AppEntry,
     LaunchCandidate,
-    _is_packaged_app_command,
-    _wait_for_visible_app_window,
     build_app_index,
     candidate_priority_key,
     classify_launch_method,
@@ -400,34 +398,6 @@ def test_open_app_response_fields() -> None:
         assert "hwnd" in res
         assert "title" in res
         assert "reused_existing" in res
-
-
-def test_wait_for_visible_app_window_early_exit() -> None:
-    entry = AppEntry("TestApp", "test.exe", "config", [], "testapp")
-    # Immediate find on check 1
-    with patch("os.name", "nt"), \
-         patch("scripts.lcu.windows.list_windows", return_value=[{"title": "TestApp", "process": "test.exe"}]), \
-         patch("time.sleep") as mock_sleep:
-        found = _wait_for_visible_app_window(entry, timeout=1.2, interval=0.1)
-        assert found is True
-        mock_sleep.assert_not_called()
-
-    # Find on check 2
-    with patch("os.name", "nt"), \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [{"title": "TestApp", "process": "test.exe"}]]), \
-         patch("time.sleep") as mock_sleep:
-        found = _wait_for_visible_app_window(entry, timeout=1.2, interval=0.1)
-        assert found is True
-        assert mock_sleep.call_count == 1
-
-
-def test_is_packaged_app_command() -> None:
-    assert _is_packaged_app_command(r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App") is True
-    assert _is_packaged_app_command(r"shell:appsfolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel") is True
-    assert _is_packaged_app_command("notepad.exe") is False
-    assert _is_packaged_app_command("outlook.exe") is False
-    assert _is_packaged_app_command("msteams:") is False
-    assert _is_packaged_app_command("ms-settings:") is False
 
 
 def test_build_app_index_cache_version_invalidation(tmp_path: Path) -> None:

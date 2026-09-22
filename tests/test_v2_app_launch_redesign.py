@@ -6,7 +6,6 @@ from unittest.mock import patch
 import pytest
 
 from scripts.lcu.app_observer import observe_window
-from scripts.lcu.app_resolver import LaunchSpec, deduplicate_specs
 from scripts.lcu.apps import (
     AppEntry,
     LaunchCandidate,
@@ -32,26 +31,19 @@ def _entry() -> AppEntry:
     )
 
 
-def test_launch_spec_dedupe_preserves_paths_args_and_cwd() -> None:
-    specs = [
-        LaunchSpec("app", "exe", r"C:\Apps\app.exe", ("--one",), r"C:\Apps"),
-        LaunchSpec("app", "exe", r"D:\Apps\app.exe", ("--one",), r"D:\Apps"),
-        LaunchSpec("app", "exe", r"C:\Apps\app.exe", ("--two",), r"C:\Apps"),
-        LaunchSpec("app", "exe", r"C:\Apps\app.exe", ("--one",), r"C:\Apps"),
-    ]
-    assert len(deduplicate_specs(specs)) == 3
-
-
-def test_candidate_dedupe_does_not_merge_exe_and_cmd_or_arguments() -> None:
+def test_candidate_dedupe_uses_full_launch_spec() -> None:
     entry = AppEntry(
         "demo", "code.exe", "config", ["demo"], "demo",
         candidates=[
             LaunchCandidate("code.exe", "exe", "config", args=("--one",)),
             LaunchCandidate("code.exe", "exe", "config", args=("--two",)),
             LaunchCandidate("code.cmd", "exe", "config", args=("--one",)),
+            LaunchCandidate(r"C:\One\app.exe", "exe", "config", cwd=r"C:\One"),
+            LaunchCandidate(r"D:\Two\app.exe", "exe", "config", cwd=r"D:\Two"),
+            LaunchCandidate(r"C:\One\app.exe", "exe", "config", cwd=r"C:\One"),
         ],
     )
-    assert len(entry.candidates) == 3
+    assert len(entry.candidates) == 5
 
 
 def test_attempt_state_omits_launch_arguments() -> None:
