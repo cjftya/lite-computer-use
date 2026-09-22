@@ -5,9 +5,9 @@ import ntpath
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,22 +15,25 @@ from typing import Any
 import yaml
 
 from .errors import LCUError
-from .launch_context import build_gui_launch_env, get_gui_env_normalization, get_launch_context_snapshot
-from .ownership import load_owned_processes, remember_owned_processes
+from .app_observer import observe_window
+from .app_resolver import LaunchSpec, atomic_write_json, cache_fingerprint, inspect_shortcut, resolve_config_path
+from .launch_context import get_gui_env_normalization, get_launch_context_snapshot
+from .ownership import remember_owned_processes
 from .processes import (
     ProcessIdentity,
-    get_process_identity,
     snapshot_is_complete,
     snapshot_processes,
-    terminate_process,
-    validate_termination_safety,
 )
+from .state import load_app_attempt, save_app_attempt
+from .win_launch import dispatch as dispatch_launch_spec
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
-APP_INDEX_CACHE_VERSION = 6
+APP_INDEX_CACHE_VERSION = 7
 APP_WINDOW_FAST_TIMEOUT = 2.5
 APP_WINDOW_GRACE_TIMEOUT = 8.0
-APP_WINDOW_READY_INTERVAL = 0.1
+APP_WINDOW_READY_INTERVAL = 0.2
+APP_WINDOW_TIMEOUT = 10.0
+_APP_INDEX_DIAGNOSTICS: dict[str, Any] = {}
 
 CANDIDATE_PRIORITY: dict[str, int] = {
     "appsfolder": 1,
@@ -47,6 +50,8 @@ class LaunchCandidate:
     method: str  # "appsfolder", "start-menu", "uri", "app-paths", "exe"
     source: str  # "config", "start-menu", "app-paths"
     args: tuple[str, ...] = ()
+    cwd: str | None = None
+    expected_identity: dict[str, Any] = field(default_factory=dict)
     priority: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,6 +62,10 @@ class LaunchCandidate:
         }
         if self.args:
             d["args"] = list(self.args)
+        if self.cwd:
+            d["cwd"] = self.cwd
+        if self.expected_identity:
+            d["expected_identity"] = self.expected_identity
         if self.priority is not None:
             d["priority"] = self.priority
         return d
@@ -72,6 +81,8 @@ class LaunchCandidate:
             method=str(d.get("method", "exe")),
             source=str(d.get("source", "")),
             args=args,
+            cwd=str(d["cwd"]) if d.get("cwd") else None,
+            expected_identity=dict(d.get("expected_identity", {})),
             priority=priority,
         )
 
@@ -82,25 +93,15 @@ def candidate_priority_key(candidate: LaunchCandidate) -> int:
     return CANDIDATE_PRIORITY.get(candidate.method, 99)
 
 
-def candidate_launch_family(candidate: LaunchCandidate) -> tuple[str, str]:
-    """Identify structurally equivalent launch candidates.
-
-    Executable wrappers such as ``code.cmd`` and ``code.exe`` intentionally share
-    one family. Shell activation (.lnk, AppsFolder, URI) remains a distinct fallback.
-    """
-
+def candidate_launch_family(candidate: LaunchCandidate) -> tuple[Any, ...]:
+    """Return the exact launch-spec key (kept under the old public name)."""
     target = candidate.target.strip().strip('"')
-    target_lower = target.lower()
-    if candidate.method in {"appsfolder", "uri", "start-menu"}:
-        return candidate.method, target_lower
-    resolved = resolve_executable(target)
-    resolved_clean = resolved.strip().strip('"')
-    basename = ntpath.basename(resolved_clean)
-    stem, suffix = ntpath.splitext(basename)
-    suffix = suffix.lower()
-    if suffix in {".exe", ".cmd", ".bat", ".com"}:
-        return "executable", stem.lower()
-    return candidate.method, resolved.lower()
+    normalized_target = os.path.normcase(os.path.normpath(target))
+    normalized_cwd = os.path.normcase(os.path.normpath(candidate.cwd)) if candidate.cwd else ""
+    kind = {
+        "appsfolder": "packaged", "start-menu": "shortcut", "app-paths": "exe"
+    }.get(candidate.method, candidate.method)
+    return (kind, normalized_target, tuple(candidate.args), normalized_cwd)
 
 
 def classify_launch_method(target: str, source: str = "") -> str:
@@ -174,7 +175,7 @@ class AppEntry:
         self.sort_and_deduplicate_candidates()
 
     def sort_and_deduplicate_candidates(self) -> None:
-        seen_keys: set[tuple[str, str]] = set()
+        seen_keys: set[tuple[Any, ...]] = set()
         unique_candidates: list[LaunchCandidate] = []
 
         sorted_cands = sorted(self.candidates, key=candidate_priority_key)
@@ -266,15 +267,21 @@ def resolve_executable(target: str) -> str:
         try:
             import winreg
 
+            views = [0]
+            for flag_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+                flag = getattr(winreg, flag_name, 0)
+                if flag not in views:
+                    views.append(flag)
             for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-                try:
-                    key_path = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{target_clean}"
-                    with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ) as key:
-                        val, _ = winreg.QueryValueEx(key, None)
-                        if val and isinstance(val, str) and Path(val.strip().strip('"')).is_file():
-                            return str(Path(val.strip().strip('"')).resolve())
-                except OSError:
-                    continue
+                for view in views:
+                    try:
+                        key_path = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{target_clean}"
+                        with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
+                            val, _ = winreg.QueryValueEx(key, None)
+                            if val and isinstance(val, str) and Path(val.strip().strip('"')).is_file():
+                                return str(Path(val.strip().strip('"')).resolve())
+                    except OSError:
+                        continue
         except Exception:
             pass
 
@@ -292,48 +299,30 @@ def _launch_cwd(resolved: str, env: dict[str, str]) -> str:
 
 
 def dispatch_candidate(candidate: LaunchCandidate) -> dict[str, Any]:
-    """Dispatch one candidate without inheriting CLI-specific Electron state."""
+    kind = {
+        "appsfolder": "packaged",
+        "start-menu": "shortcut",
+        "uri": "uri",
+        "app-paths": "exe",
+        "exe": "cmd-wrapper" if candidate.target.lower().endswith((".cmd", ".bat")) else "exe",
+    }.get(candidate.method, candidate.method)
+    resolved = candidate.target if kind in {"packaged", "shortcut", "uri"} else resolve_executable(candidate.target)
+    spec = LaunchSpec(
+        app_id="", kind=kind, target=candidate.target, argv=candidate.args,
+        cwd=candidate.cwd, source=candidate.source,
+        expected_identity=candidate.expected_identity, priority=candidate.priority,
+    )
+    receipt = dispatch_launch_spec(spec, resolved=resolved)
+    result = receipt.to_dict()
+    result["launch_type"] = receipt.backend
+    return result
 
-    if candidate.method in {"appsfolder", "start-menu", "uri"}:
-        if os.name != "nt":
-            raise OSError(f"Windows Shell activation is unavailable for {candidate.method}")
-        os.startfile(candidate.target)
-        return {
-            "launch_type": "windows-shell",
-            "sanitized_env_applied": False,
-            "pid": None,
-        }
 
-    resolved = resolve_executable(candidate.target)
-    env = build_gui_launch_env()
-    common_kwargs: dict[str, Any] = {
-        "shell": False,
-        "env": env,
-        "cwd": _launch_cwd(resolved, env),
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    resolved_lower = resolved.lower()
-    if resolved_lower.endswith((".cmd", ".bat")):
-        cmd = ["cmd.exe", "/d", "/s", "/c", resolved, *candidate.args]
-    else:
-        cmd = [resolved, *candidate.args]
-    process = subprocess.Popen(cmd, **common_kwargs)
-    pid = getattr(process, "pid", None)
-    dispatch_identity = None
-    if os.name == "nt" and isinstance(pid, int):
-        identity = get_process_identity(pid)
-        if identity is not None:
-            dispatch_identity = identity.to_dict()
-    return {
-        "launch_type": "normalized-process",
-        "sanitized_env_applied": True,
-        "gui_env_normalization": get_gui_env_normalization(applied=True),
-        "pid": pid,
-        "dispatch_identity": dispatch_identity,
-        "resolved": resolved,
-    }
+def _can_merge_discovered_entry(existing: AppEntry, discovered: AppEntry) -> bool:
+    """Merge one resolver source into config, never two same-name installations."""
+    if existing.source != "config":
+        return False
+    return not any(candidate.source == discovered.source for candidate in existing.candidates)
 
 
 def is_matching_window(win: dict[str, Any], entry: AppEntry) -> bool:
@@ -370,6 +359,9 @@ def is_matching_window(win: dict[str, Any], entry: AppEntry) -> bool:
         t = cand.target.strip().lower()
         if t.endswith(".exe"):
             known_exes.add(ntpath.basename(t).lower())
+        shortcut_target = str(cand.expected_identity.get("target_path", "")).strip().lower()
+        if shortcut_target.endswith(".exe"):
+            known_exes.add(ntpath.basename(shortcut_target).lower())
     if not known_exes:
         known_exes.add(f"{entry.normalized}.exe")
         known_exes.add(f"{entry.name.lower()}.exe")
@@ -409,12 +401,8 @@ def find_matching_windows(
     entry: AppEntry, windows_list: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
     if windows_list is None:
-        try:
-            from .windows import list_windows
-
-            windows_list = list_windows()
-        except Exception:
-            return []
+        from .windows import list_windows
+        windows_list = list_windows()
 
     return [w for w in windows_list if is_matching_window(w, entry)]
 
@@ -458,16 +446,30 @@ def get_cache_file_path() -> Path:
     return temp_dir / "app-index.json"
 
 
+def get_app_index_diagnostics(config_path: Path | None = None) -> dict[str, Any]:
+    fingerprint = cache_fingerprint(config_path)
+    cache_path = get_cache_file_path()
+    cache_hit = _APP_INDEX_DIAGNOSTICS.get("cache_hit")
+    if cache_hit is None:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            cache_hit = bool(
+                cached.get("version") == APP_INDEX_CACHE_VERSION
+                and cached.get("fingerprint") == fingerprint
+                and time.time() - float(cached.get("timestamp", 0)) < CACHE_MAX_AGE_SECONDS
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            cache_hit = False
+    return {
+        "config": fingerprint,
+        "cache_path": str(cache_path),
+        "cache_version": APP_INDEX_CACHE_VERSION,
+        "cache_hit": cache_hit,
+    }
+
+
 def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
-    if config_path is None:
-        candidates = [
-            Path(__file__).resolve().parent.parent.parent / "config" / "apps.yaml",
-            Path.cwd() / "config" / "apps.yaml",
-        ]
-        for c in candidates:
-            if c.is_file():
-                config_path = c
-                break
+    config_path = resolve_config_path(config_path)
 
     if config_path is None or not config_path.is_file():
         return []
@@ -497,6 +499,7 @@ def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
                     cand_target = str(item.get("target", "")).strip()
                     raw_args = item.get("args", [])
                     cand_args = tuple(str(a) for a in raw_args) if isinstance(raw_args, (list, tuple)) else ()
+                    cand_cwd = str(item["cwd"]) if item.get("cwd") else None
                     p = item.get("priority")
                     cand_priority = int(p) if p is not None else None
                     method = classify_launch_method(cand_target, "config")
@@ -506,6 +509,7 @@ def load_config_apps(config_path: Path | None = None) -> list[AppEntry]:
                             method=method,
                             source="config",
                             args=cand_args,
+                            cwd=cand_cwd,
                             priority=cand_priority,
                         )
                     )
@@ -559,6 +563,7 @@ def discover_start_menu_apps() -> list[AppEntry]:
                 stem = lnk.stem.strip()
                 if not stem:
                     continue
+                metadata = inspect_shortcut(lnk)
                 entries.append(
                     AppEntry(
                         name=stem,
@@ -566,6 +571,12 @@ def discover_start_menu_apps() -> list[AppEntry]:
                         source="start-menu",
                         aliases=[stem],
                         normalized=normalize_app_name(stem),
+                        candidates=[
+                            LaunchCandidate(
+                                target=str(lnk.resolve()), method="start-menu", source="start-menu",
+                                cwd=metadata.get("working_directory"), expected_identity=metadata,
+                            )
+                        ],
                     )
                 )
         except Exception:
@@ -584,42 +595,55 @@ def discover_app_paths_apps() -> list[AppEntry]:
         return []
 
     base_key = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
+    views = [0]
+    for flag_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        flag = getattr(winreg, flag_name, 0)
+        if flag not in views:
+            views.append(flag)
+    seen_targets: set[tuple[str, str]] = set()
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-        try:
-            root = winreg.OpenKey(hive, base_key, 0, winreg.KEY_READ)
-        except OSError:
-            continue
-        with root:
+        for view in views:
             try:
-                count = winreg.QueryInfoKey(root)[0]
+                root = winreg.OpenKey(hive, base_key, 0, winreg.KEY_READ | view)
             except OSError:
                 continue
-            for i in range(count):
+            with root:
                 try:
-                    subkey_name = winreg.EnumKey(root, i)
-                    with winreg.OpenKey(root, subkey_name) as subkey:
-                        target, _ = winreg.QueryValueEx(subkey, None)
+                    count = winreg.QueryInfoKey(root)[0]
                 except OSError:
                     continue
-                if not isinstance(target, str) or not target.strip():
-                    continue
-                target_clean = target.strip().strip('"')
-                name = Path(subkey_name).stem
-                entries.append(
-                    AppEntry(
-                        name=name,
-                        target=target_clean,
-                        source="app-paths",
-                        aliases=[name, subkey_name],
-                        normalized=normalize_app_name(name),
+                for i in range(count):
+                    try:
+                        subkey_name = winreg.EnumKey(root, i)
+                        with winreg.OpenKey(root, subkey_name) as subkey:
+                            target, _ = winreg.QueryValueEx(subkey, None)
+                    except OSError:
+                        continue
+                    if not isinstance(target, str) or not target.strip():
+                        continue
+                    target_clean = target.strip().strip('"')
+                    name = Path(subkey_name).stem
+                    key = (name.casefold(), os.path.normcase(os.path.normpath(target_clean)))
+                    if key in seen_targets:
+                        continue
+                    seen_targets.add(key)
+                    entries.append(
+                        AppEntry(
+                            name=name,
+                            target=target_clean,
+                            source="app-paths",
+                            aliases=[name, subkey_name],
+                            normalized=normalize_app_name(name),
+                        )
                     )
-                )
     return entries
 
 
 def build_app_index(config_path: Path | None = None, force_refresh: bool = False) -> list[AppEntry]:
+    global _APP_INDEX_DIAGNOSTICS
     cache_path = get_cache_file_path()
     now = time.time()
+    fingerprint = cache_fingerprint(config_path)
 
     if not force_refresh and cache_path.is_file():
         try:
@@ -627,8 +651,13 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
                 cached_data = json.load(f)
             cached_version = cached_data.get("version")
             cached_time = cached_data.get("timestamp", 0)
-            if cached_version == APP_INDEX_CACHE_VERSION and (now - cached_time < CACHE_MAX_AGE_SECONDS):
+            if (
+                cached_version == APP_INDEX_CACHE_VERSION
+                and cached_data.get("fingerprint") == fingerprint
+                and (now - cached_time < CACHE_MAX_AGE_SECONDS)
+            ):
                 items = cached_data.get("apps", [])
+                _APP_INDEX_DIAGNOSTICS = {"cache_hit": True, "fingerprint": fingerprint}
                 return [AppEntry.from_dict(item) for item in items]
         except Exception:
             pass
@@ -650,7 +679,7 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
         app_keys = entry_match_keys(app)
         matched_idx = None
         for i, existing in enumerate(indexed_entries):
-            if entry_match_keys(existing) & app_keys:
+            if entry_match_keys(existing) & app_keys and _can_merge_discovered_entry(existing, app):
                 matched_idx = i
                 break
         if matched_idx is not None:
@@ -665,7 +694,7 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
         app_keys = entry_match_keys(app)
         matched_idx = None
         for i, existing in enumerate(indexed_entries):
-            if entry_match_keys(existing) & app_keys:
+            if entry_match_keys(existing) & app_keys and _can_merge_discovered_entry(existing, app):
                 matched_idx = i
                 break
         if matched_idx is not None:
@@ -676,18 +705,17 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
             indexed_entries.append(app)
 
     result = indexed_entries
+    _APP_INDEX_DIAGNOSTICS = {"cache_hit": False, "fingerprint": fingerprint}
     try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "version": APP_INDEX_CACHE_VERSION,
-                    "timestamp": now,
-                    "apps": [app.to_dict() for app in result],
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
+        atomic_write_json(
+            cache_path,
+            {
+                "version": APP_INDEX_CACHE_VERSION,
+                "timestamp": now,
+                "fingerprint": fingerprint,
+                "apps": [app.to_dict() for app in result],
+            },
+        )
     except Exception:
         pass
 
@@ -786,24 +814,90 @@ def _poll_for_launched_window(
     before_hwnds: set[int],
     timeout: float,
 ) -> dict[str, Any] | None:
-    max_checks = (
-        max(1, int(round(timeout / APP_WINDOW_READY_INTERVAL)) + 1)
-        if APP_WINDOW_READY_INTERVAL > 0
-        else 1
+    from .windows import list_windows
+
+    observed = observe_window(
+        list_windows=list_windows,
+        is_match=lambda window: is_matching_window(window, entry),
+        baseline_hwnds=before_hwnds,
+        timeout=timeout,
+        interval=APP_WINDOW_READY_INTERVAL,
     )
-    deadline = time.monotonic() + timeout
-    for check in range(max_checks):
-        try:
-            detected = _detect_launched_window(entry, before_hwnds)
-            if detected is not None:
-                return detected
-        except Exception:
-            pass
-        if check + 1 >= max_checks or time.monotonic() >= deadline:
-            break
-        if APP_WINDOW_READY_INTERVAL > 0:
-            time.sleep(APP_WINDOW_READY_INTERVAL)
+    if observed.status == "found":
+        return observed.window
+    if observed.status == "observation_error":
+        raise LCUError(
+            "window_observation_failed",
+            f"Could not enumerate windows for '{entry.name}'",
+            details={"stage": "observe", "observation_error": observed.error},
+        )
+    if observed.status == "ambiguous":
+        raise LCUError(
+            "ambiguous_target",
+            f"Multiple new windows matched '{entry.name}'",
+            candidates=[_window_candidate(window) for window in observed.candidates[:10]],
+            details={"stage": "observe", "retry_launch_allowed": False},
+        )
     return None
+
+
+def _window_candidate(window: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hwnd": window.get("hwnd"),
+        "pid": window.get("pid"),
+        "title": window.get("title", ""),
+        "process": window.get("process", ""),
+        "active": bool(window.get("active")),
+    }
+
+
+def _error_details(
+    *, attempt_id: str, stage: str, dispatch_accepted: bool | None,
+    hwnd: int | None = None, window_pid: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "attempt_id": attempt_id,
+        "stage": stage,
+        "dispatch_accepted": dispatch_accepted,
+        "hwnd": hwnd,
+        "window_pid": window_pid,
+        "window_verified": hwnd is not None,
+        "foreground": False,
+        "retry_launch_allowed": False,
+    }
+
+
+def _coerce_receipt(info: dict[str, Any], elapsed_ms: float) -> dict[str, Any]:
+    if "status" in info:
+        return info
+    # Compatibility for custom dispatch adapters written against the v2 dict.
+    return {
+        **info,
+        "status": "accepted",
+        "accepted": True,
+        "backend": info.get("launch_type", "legacy-adapter"),
+        "elapsed_ms": elapsed_ms,
+        "fallback_eligible": False,
+    }
+
+
+def _entry_for_attempt(entry: AppEntry) -> dict[str, Any]:
+    data = entry.to_dict()
+    data["commands"] = []
+    for candidate in data.get("candidates", []):
+        candidate.pop("args", None)
+        expected = candidate.get("expected_identity")
+        if isinstance(expected, dict):
+            expected.pop("arguments", None)
+    return data
+
+
+def _candidate_target_is_stale(candidate: LaunchCandidate) -> bool:
+    if candidate.method in {"uri", "appsfolder"}:
+        return False
+    target = candidate.target.strip().strip('"')
+    path = Path(target)
+    return (path.is_absolute() or candidate.method == "start-menu") and not path.is_file()
 
 
 def open_app(
@@ -815,14 +909,14 @@ def open_app(
         raise LCUError("invalid_arguments", "Application name cannot be empty")
 
     started_at = time.monotonic()
-    try:
-        load_owned_processes(prune=True)
-    except Exception:
-        pass
+    attempt_id = str(uuid.uuid4())
 
     resolve_started_at = time.monotonic()
     index = build_app_index(config_path)
     entry, candidates = find_app_entry(name.strip(), index)
+    if entry is None and not candidates:
+        index = build_app_index(config_path, force_refresh=True)
+        entry, candidates = find_app_entry(name.strip(), index)
     resolve_ms = round((time.monotonic() - resolve_started_at) * 1000, 1)
 
     if candidates:
@@ -830,18 +924,42 @@ def open_app(
             "ambiguous_target",
             f"Multiple applications matched '{name}'",
             candidates=candidates[:10],
+            details=_error_details(attempt_id=attempt_id, stage="resolve", dispatch_accepted=False),
         )
 
     if entry is None:
-        raise LCUError("not_found", f"No application found matching '{name}'")
+        raise LCUError(
+            "target_not_found", f"No application found matching '{name}'",
+            details=_error_details(attempt_id=attempt_id, stage="resolve", dispatch_accepted=False),
+        )
+
+    if any(_candidate_target_is_stale(candidate) for candidate in entry.candidates):
+        refreshed = build_app_index(config_path, force_refresh=True)
+        refreshed_entry, refreshed_candidates = find_app_entry(name.strip(), refreshed)
+        if refreshed_entry is not None and not refreshed_candidates:
+            entry = refreshed_entry
 
     # Phase 6: Pre-check for existing window
+    from .windows import focus_window, list_windows
     try:
-        from .windows import focus_window, list_windows
-
         existing_windows = find_matching_windows(entry)
-    except Exception:
-        existing_windows = []
+    except Exception as exc:
+        raise LCUError(
+            "window_observation_failed",
+            f"Could not inspect existing windows for '{name}'",
+            details={
+                **_error_details(attempt_id=attempt_id, stage="inspect_existing", dispatch_accepted=False),
+                "observation_error": f"{type(exc).__name__}: {exc}",
+            },
+        ) from exc
+
+    if len(existing_windows) > 1:
+        raise LCUError(
+            "ambiguous_target",
+            f"Multiple existing windows matched '{name}'",
+            candidates=[_window_candidate(window) for window in existing_windows[:10]],
+            details=_error_details(attempt_id=attempt_id, stage="inspect_existing", dispatch_accepted=False),
+        )
 
     # Single existing window -> restore/focus and reuse
     if len(existing_windows) == 1:
@@ -860,6 +978,11 @@ def open_app(
                 "window_pid": win_pid,
                 "window_process": win_proc,
                 "owned_processes": [],
+                "attempt_id": attempt_id,
+                "stage": "ready",
+                "dispatch_accepted": False,
+                "window_verified": True,
+                "foreground": True,
             }
             if debug:
                 result["debug"] = {
@@ -872,11 +995,18 @@ def open_app(
                     "sanitized_env_applied": False,
                 }
             return result
-        except Exception:
-            # If focusing existing window fails (e.g. was closing), proceed to fresh launch
-            pass
+        except Exception as exc:
+            raise LCUError(
+                "window_focus_failed",
+                f"Existing window for '{name}' could not be focused: {exc}",
+                candidates=[_window_candidate(target_win)],
+                details=_error_details(
+                    attempt_id=attempt_id, stage="focus", dispatch_accepted=False,
+                    hwnd=target_win.get("hwnd"), window_pid=target_win.get("pid"),
+                ),
+            ) from exc
 
-    # Baseline processes and window handles before any candidate launch
+    # Process data is used only for best-effort cleanup evidence after success.
     try:
         baseline_processes = snapshot_processes()
         baseline_pids = set(baseline_processes.keys())
@@ -888,98 +1018,123 @@ def open_app(
 
     try:
         all_before = list_windows()
-        before_hwnds = {w.get("hwnd", 0) for w in all_before}
-    except Exception:
-        all_before = []
-        before_hwnds = set()
+        before_hwnds = {int(w.get("hwnd", 0)) for w in all_before}
+    except Exception as exc:
+        raise LCUError(
+            "window_observation_failed", f"Could not establish window baseline for '{name}'",
+            details={
+                **_error_details(attempt_id=attempt_id, stage="observe", dispatch_accepted=False),
+                "observation_error": f"{type(exc).__name__}: {exc}",
+            },
+        ) from exc
 
     attempts: list[dict[str, Any]] = []
-    successful_result: dict[str, Any] | None = None
-
-    success_cleanup, failure_cleanup = _cleanup_policies(entry)
-    expected_process_names = entry.process_cleanup.get("process_names", [])
-    dispatched_families: set[tuple[str, str]] = set()
+    success_cleanup, _failure_cleanup = _cleanup_policies(entry)
+    dispatched_families: set[tuple[Any, ...]] = set()
     candidate_count = 0
     rollback_count = 0
     dispatch_ms = 0.0
     sanitized_env_applied = False
     safety_warnings: list[str] = []
     if not baseline_trusted:
-        safety_warnings.append("baseline_process_snapshot_untrusted: ownership and rollback disabled")
+        safety_warnings.append("baseline_process_snapshot_untrusted: ownership recording disabled")
 
+    selected_candidate: LaunchCandidate | None = None
+    receipt: dict[str, Any] | None = None
+    fallback_used = False
     for candidate in entry.candidates:
+        if _candidate_target_is_stale(candidate):
+            attempts.append({
+                "method": candidate.method,
+                "target": candidate.target,
+                "result": "stale_target",
+            })
+            continue
         family = candidate_launch_family(candidate)
         if family in dispatched_families:
             continue
         dispatched_families.add(family)
         candidate_count += 1
 
-        # Per-attempt process snapshot BEFORE dispatch
-        try:
-            before_cand_processes = snapshot_processes()
-            before_cand_pids = set(before_cand_processes.keys())
-            before_cand_trusted = snapshot_is_complete(before_cand_processes)
-        except Exception:
-            before_cand_processes = baseline_processes
-            before_cand_pids = set(baseline_pids)
-            before_cand_trusted = False
-
         try:
             dispatch_started_at = time.monotonic()
             dispatch_info = dispatch_candidate(candidate)
-            dispatch_ms += (time.monotonic() - dispatch_started_at) * 1000
+            elapsed_ms = (time.monotonic() - dispatch_started_at) * 1000
+            dispatch_ms += elapsed_ms
+            receipt = _coerce_receipt(dispatch_info, elapsed_ms)
             sanitized_env_applied = sanitized_env_applied or bool(
-                dispatch_info.get("sanitized_env_applied")
+                receipt.get("sanitized_env_applied")
             )
-            raw_dispatch_identity = dispatch_info.get("dispatch_identity")
-            try:
-                dispatch_identity = (
-                    ProcessIdentity.from_dict(raw_dispatch_identity)
-                    if isinstance(raw_dispatch_identity, dict)
-                    else None
-                )
-            except (KeyError, TypeError, ValueError):
-                dispatch_identity = None
         except Exception as exc:
-            attempts.append(
-                {
-                    "method": candidate.method,
-                    "target": candidate.target,
-                    "result": "dispatch_error",
-                    "error_type": type(exc).__name__,
-                }
+            code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+            receipt = {
+                "status": "rejected", "accepted": False, "backend": "adapter",
+                "elapsed_ms": round((time.monotonic() - dispatch_started_at) * 1000, 1),
+                "error_code": code, "error_type": type(exc).__name__, "message": str(exc),
+                "fallback_eligible": code in {2, 3},
+            }
+        attempts.append({
+            "method": candidate.method, "target": candidate.target,
+            "result": f"dispatch_{receipt['status']}", "backend": receipt.get("backend"),
+            "error_code": receipt.get("error_code"), "error_type": receipt.get("error_type"),
+        })
+        if receipt["status"] == "rejected":
+            if receipt.get("fallback_eligible") and not fallback_used:
+                fallback_used = True
+                continue
+            raise LCUError(
+                "dispatch_rejected", f"Windows rejected launch of '{name}'",
+                attempts=attempts, candidates=[c.target for c in entry.candidates],
+                details={
+                    **_error_details(attempt_id=attempt_id, stage="dispatch", dispatch_accepted=False),
+                    "backend": receipt.get("backend"), "error_code": receipt.get("error_code"),
+                },
             )
-            continue
+        selected_candidate = candidate
+        break
 
-        window_wait_started_at = time.monotonic()
-        detected_win = _poll_for_launched_window(entry, before_hwnds, APP_WINDOW_FAST_TIMEOUT)
-        latest_processes: dict[int, ProcessIdentity] | None = None
-
-        if detected_win is None:
-            try:
-                latest_processes = snapshot_processes()
-            except Exception:
-                latest_processes = {}
-            dispatcher_alive = bool(
-                dispatch_identity is not None
-                and dispatch_identity.pid in latest_processes
-                and latest_processes[dispatch_identity.pid].creation_time
-                == dispatch_identity.creation_time
+    if selected_candidate is None or receipt is None:
+        if attempts and all(attempt.get("result") == "stale_target" for attempt in attempts):
+            raise LCUError(
+                "target_not_found", f"All resolved launch targets for '{name}' are stale",
+                attempts=attempts, candidates=[c.target for c in entry.candidates],
+                details=_error_details(
+                    attempt_id=attempt_id, stage="resolve", dispatch_accepted=False
+                ),
             )
-            if dispatcher_alive:
-                grace_timeout = max(0.0, APP_WINDOW_GRACE_TIMEOUT - APP_WINDOW_FAST_TIMEOUT)
-                detected_win = _poll_for_launched_window(entry, before_hwnds, grace_timeout)
+        raise LCUError(
+            "dispatch_rejected", f"No launch specification was accepted for '{name}'",
+            attempts=attempts, candidates=[c.target for c in entry.candidates],
+            details=_error_details(attempt_id=attempt_id, stage="dispatch", dispatch_accepted=False),
+        )
 
-        if detected_win is not None:
+    dispatch_accepted = True if receipt["status"] == "accepted" else None
+    window_wait_started_at = time.monotonic()
+    try:
+        detected_win = _poll_for_launched_window(entry, before_hwnds, APP_WINDOW_TIMEOUT)
+    except LCUError as exc:
+        exc.details = {
+            **_error_details(
+                attempt_id=attempt_id, stage="observe", dispatch_accepted=dispatch_accepted
+            ),
+            "backend": receipt.get("backend"),
+            **exc.details,
+        }
+        raise
+
+    if detected_win is not None:
             detected_hwnd = detected_win.get("hwnd", 0)
             try:
-                from .windows import focus_window
-
                 focus_window(hwnd=detected_hwnd)
             except Exception as exc:
                 raise LCUError(
                     "window_focus_failed",
                     f"Window with hwnd {detected_hwnd} detected for '{name}', but failed to focus: {exc}",
+                    candidates=[_window_candidate(detected_win)],
+                    details=_error_details(
+                        attempt_id=attempt_id, stage="focus", dispatch_accepted=dispatch_accepted,
+                        hwnd=detected_hwnd, window_pid=detected_win.get("pid"),
+                    ),
                 ) from exc
 
             is_reused = detected_hwnd in before_hwnds
@@ -998,14 +1153,13 @@ def open_app(
             owned_processes: list[dict[str, Any]] = []
 
             # Only track owned processes if NOT reusing an existing window and window PID is not a baseline process
-            if (
-                baseline_trusted
-                and before_cand_trusted
-                and not is_reused
-                and dispatch_identity is not None
-                and dispatch_identity.creation_time is not None
-                and dispatch_identity.session_id is not None
-                and (win_pid is None or win_pid not in baseline_pids)
+            raw_dispatch_identity = receipt.get("dispatch_identity")
+            try:
+                dispatch_identity = ProcessIdentity.from_dict(raw_dispatch_identity) if isinstance(raw_dispatch_identity, dict) else None
+            except (KeyError, TypeError, ValueError):
+                dispatch_identity = None
+            if baseline_trusted and not is_reused and dispatch_identity is not None and (
+                win_pid is None or win_pid not in baseline_pids
             ):
                 try:
                     after_processes = snapshot_processes()
@@ -1022,16 +1176,21 @@ def open_app(
                     p_dict["ownership_evidence"] = "exact-dispatch-identity"
                     owned_processes.append(p_dict)
 
-            successful_result = {
+            successful_result: dict[str, Any] = {
                 "app": entry.name,
-                "target": candidate.target,
-                "launch_method": candidate.method,
+                "target": selected_candidate.target,
+                "launch_method": selected_candidate.method,
                 "hwnd": detected_hwnd,
                 "title": detected_win.get("title", entry.name),
                 "reused_existing": is_reused,
                 "window_pid": win_pid,
                 "window_process": win_proc,
                 "owned_processes": owned_processes,
+                "attempt_id": attempt_id,
+                "stage": "ready",
+                "dispatch_accepted": dispatch_accepted,
+                "window_verified": True,
+                "foreground": True,
             }
             try:
                 remember_owned_processes(
@@ -1057,52 +1216,55 @@ def open_app(
                     ),
                     "safety_warnings": safety_warnings,
                 }
-            break
-        else:
-            # Rollback only after both staged wait periods have expired.
-            rollback_pids: list[int] = []
-            if (
-                failure_cleanup == "rollback-owned"
-                and baseline_trusted
-                and before_cand_trusted
-                and dispatch_identity is not None
-            ):
-                try:
-                    after_cand_processes = snapshot_processes()
-                    allowed_names = expected_process_names or [ntpath.basename(candidate.target).lower()]
-                    p_ident = after_cand_processes.get(dispatch_identity.pid)
-                    if (
-                        snapshot_is_complete(after_cand_processes)
-                        and p_ident is not None
-                        and p_ident.creation_time == dispatch_identity.creation_time
-                    ):
-                        safe, reason = validate_termination_safety(
-                            identity=dispatch_identity,
-                            baseline_pids=baseline_pids,
-                            allowed_process_names=allowed_names,
-                        )
-                        if safe and terminate_process(dispatch_identity):
-                            rollback_pids.append(dispatch_identity.pid)
-                            rollback_count += 1
-                except Exception:
-                    pass
+            return successful_result
 
-            attempts.append(
-                {
-                    "method": candidate.method,
-                    "target": candidate.target,
-                    "result": "no_visible_window",
-                    "rolled_back_pids": rollback_pids,
-                    "window_wait_ms": round((time.monotonic() - window_wait_started_at) * 1000, 1),
-                }
-            )
+    save_app_attempt(
+        attempt_id,
+        {
+            "entry": _entry_for_attempt(entry), "baseline_hwnds": sorted(before_hwnds),
+            "dispatch": {
+                "status": receipt.get("status"), "backend": receipt.get("backend"),
+                "pid": receipt.get("pid"), "elapsed_ms": receipt.get("elapsed_ms"),
+            },
+        },
+    )
+    error_code = "window_unconfirmed" if dispatch_accepted is True else "dispatch_outcome_unknown"
+    raise LCUError(
+        error_code,
+        f"Launch was dispatched for '{name}', but no target window was confirmed",
+        attempts=attempts,
+        candidates=[c.target for c in entry.candidates],
+        details={
+            **_error_details(attempt_id=attempt_id, stage="observe", dispatch_accepted=dispatch_accepted),
+            "backend": receipt.get("backend"),
+            "window_wait_ms": round((time.monotonic() - window_wait_started_at) * 1000, 1),
+        },
+    )
 
-    if successful_result is None:
-        raise LCUError(
-            "dispatch_failed",
-            f"Failed to launch application '{name}' ({entry.target}): no visible window found",
-            attempts=attempts,
-            candidates=[c.target for c in entry.candidates],
-        )
 
-    return successful_result
+def app_status(attempt_id: str, timeout: float = 0.0) -> dict[str, Any]:
+    try:
+        payload = load_app_attempt(attempt_id)
+    except KeyError as exc:
+        raise LCUError("attempt_not_found", f"No app attempt found: {attempt_id}") from exc
+    except TimeoutError as exc:
+        raise LCUError("attempt_expired", f"App attempt has expired: {attempt_id}") from exc
+    except ValueError as exc:
+        raise LCUError("attempt_invalid", str(exc)) from exc
+    entry = AppEntry.from_dict(payload["entry"])
+    before_hwnds = {int(value) for value in payload.get("baseline_hwnds", [])}
+    detected = _poll_for_launched_window(entry, before_hwnds, max(0.0, timeout))
+    if detected is None:
+        return {
+            "attempt_id": attempt_id, "stage": "observe", "status": "window_unconfirmed",
+            "dispatch_accepted": payload.get("dispatch", {}).get("status") == "accepted",
+            "window_verified": False, "foreground": False, "retry_launch_allowed": False,
+        }
+    return {
+        "attempt_id": attempt_id, "stage": "observe", "status": "window_found",
+        "dispatch_accepted": payload.get("dispatch", {}).get("status") == "accepted",
+        "hwnd": detected.get("hwnd"), "window_pid": detected.get("pid"),
+        "window_verified": True, "foreground": bool(detected.get("active")),
+        "title": detected.get("title", ""), "process": detected.get("process", ""),
+        "retry_launch_allowed": False,
+    }

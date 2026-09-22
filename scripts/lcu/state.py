@@ -1,8 +1,58 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import time
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
+
+APP_ATTEMPT_VERSION = 1
+APP_ATTEMPT_TTL_SECONDS = 300.0
+
+
+def get_app_attempt_dir() -> Path:
+    path = Path(tempfile.gettempdir()) / "LiteComputerUse" / "app-attempts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save_app_attempt(attempt_id: str, payload: dict[str, Any]) -> None:
+    """Store minimal observation state; this is never termination authority."""
+    path = get_app_attempt_dir() / f"{attempt_id}.json"
+    record = {"version": APP_ATTEMPT_VERSION, "created_at": time.time(), "attempt": payload}
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def load_app_attempt(attempt_id: str, ttl: float = APP_ATTEMPT_TTL_SECONDS) -> dict[str, Any]:
+    if not attempt_id or any(ch not in "0123456789abcdef-" for ch in attempt_id.casefold()):
+        raise ValueError("Invalid attempt id")
+    path = get_app_attempt_dir() / f"{attempt_id}.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise KeyError(attempt_id) from exc
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Attempt state is unreadable") from exc
+    if record.get("version") != APP_ATTEMPT_VERSION:
+        raise ValueError("Attempt state version is unsupported")
+    created_at = record.get("created_at")
+    if not isinstance(created_at, (int, float)) or time.time() - created_at > ttl:
+        raise TimeoutError("Attempt state has expired")
+    payload = record.get("attempt")
+    if not isinstance(payload, dict):
+        raise ValueError("Attempt state is invalid")
+    return payload
 
 TaskStatus = Literal["pending", "active", "completed", "failed"]
 VALID_TASK_STATUSES: set[TaskStatus] = {"pending", "active", "completed", "failed"}

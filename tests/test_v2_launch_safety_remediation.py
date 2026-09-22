@@ -79,8 +79,7 @@ def test_s01_untrusted_baseline_disables_ownership() -> None:
         "active": True,
     }
 
-    with patch("scripts.lcu.apps.load_owned_processes", return_value=[]), patch(
-        "scripts.lcu.apps.build_app_index", return_value=[entry]
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]
     ), patch("scripts.lcu.apps.find_matching_windows", return_value=[]), patch(
         "scripts.lcu.windows.list_windows", return_value=[]
     ), patch(

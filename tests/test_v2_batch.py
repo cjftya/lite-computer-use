@@ -23,7 +23,7 @@ def test_validate_batch_max_limit() -> None:
 
 
 def test_validate_batch_disallowed_actions() -> None:
-    disallowed = ["screenshot", "list_windows", "find_path", "get_clipboard", "get_mouse_position", "doctor"]
+    disallowed = ["screenshot", "list_windows", "find_path", "get_clipboard", "get_mouse_position", "doctor", "app_status"]
     for action in disallowed:
         with pytest.raises(LCUError) as exc:
             validate_batch_actions([{"action": action}])

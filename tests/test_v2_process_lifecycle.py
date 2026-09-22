@@ -296,8 +296,8 @@ def test_c3_chrome_cleanup_preserves_baseline() -> None:
         mock_terminate.assert_not_called()
 
 
-def test_c4_chrome_failed_launch_rollback() -> None:
-    """C4: new chrome PID created, but visible window never appeared -> rollback terminates new PID only, baseline preserved"""
+def test_c4_chrome_unconfirmed_launch_never_rolls_back() -> None:
+    """An accepted Chrome launch with no window is preserved for status observation."""
     baseline_ident = ProcessIdentity(5555, 1, "chrome.exe", None, 100, 1)
     failed_new_ident = ProcessIdentity(6666, 5555, "chrome.exe", None, 200, 1)
 
@@ -312,26 +312,21 @@ def test_c4_chrome_failed_launch_rollback() -> None:
     )
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("scripts.lcu.apps.snapshot_processes", side_effect=[
-             {5555: baseline_ident},  # baseline
-             {5555: baseline_ident},  # before candidate
-             {5555: baseline_ident, 6666: failed_new_ident},  # staged-wait liveness
-             {5555: baseline_ident, 6666: failed_new_ident},  # after candidate failure
-         ]), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={5555: baseline_ident}), \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
-         patch("scripts.lcu.apps.terminate_process", return_value=True) as mock_terminate, \
-         patch("scripts.lcu.apps.validate_termination_safety", return_value=(True, "ok")), \
-         patch("time.sleep"), \
+         patch("scripts.lcu.processes.terminate_process") as mock_terminate, \
+         patch("scripts.lcu.apps._poll_for_launched_window", return_value=None), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
          patch("os.name", "nt"), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={
+             "status": "accepted", "accepted": True, "backend": "process",
              "sanitized_env_applied": True,
              "dispatch_identity": failed_new_ident.to_dict(),
          }):
         with pytest.raises(LCUError) as exc_info:
             open_app("chrome")
-        assert exc_info.value.code == "dispatch_failed"
-        # Only new PID 6666 was terminated, NOT 5555!
-        mock_terminate.assert_called_once_with(failed_new_ident)
+        assert exc_info.value.code == "window_unconfirmed"
+        mock_terminate.assert_not_called()
 
 
 # ============================================================================
@@ -372,8 +367,8 @@ def test_v1_v2_vscode_new_window_with_daemon_processes() -> None:
         assert res["owned_processes"] == []
 
 
-def test_v3_vscode_failed_launch_rollback() -> None:
-    """V3: failed launch rollback terminates newly created Code PID only"""
+def test_v3_vscode_unconfirmed_launch_never_rolls_back() -> None:
+    """A late VS Code handoff is not terminated when its window is unconfirmed."""
     baseline_code = ProcessIdentity(7001, 1, "Code.exe", None, 100, 1)
     new_orphan_code = ProcessIdentity(7002, 1, "Code.exe", None, 200, 1)
 
@@ -388,25 +383,21 @@ def test_v3_vscode_failed_launch_rollback() -> None:
     )
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("scripts.lcu.apps.snapshot_processes", side_effect=[
-            {7001: baseline_code},
-            {7001: baseline_code},
-            {7001: baseline_code, 7002: new_orphan_code},
-            {7001: baseline_code, 7002: new_orphan_code},
-        ]), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={7001: baseline_code}), \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
-         patch("scripts.lcu.apps.terminate_process", return_value=True) as mock_terminate, \
-         patch("scripts.lcu.apps.validate_termination_safety", return_value=(True, "ok")), \
-         patch("time.sleep"), \
+         patch("scripts.lcu.processes.terminate_process") as mock_terminate, \
+         patch("scripts.lcu.apps._poll_for_launched_window", return_value=None), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
          patch("os.name", "nt"), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={
+             "status": "accepted", "accepted": True, "backend": "process",
              "sanitized_env_applied": True,
              "dispatch_identity": new_orphan_code.to_dict(),
          }):
         with pytest.raises(LCUError) as exc_info:
             open_app("vscode")
-        assert exc_info.value.code == "dispatch_failed"
-        mock_terminate.assert_called_once_with(new_orphan_code)
+        assert exc_info.value.code == "window_unconfirmed"
+        mock_terminate.assert_not_called()
 
 
 # ============================================================================

@@ -257,8 +257,8 @@ def test_open_app_appsfolder_success() -> None:
         mock_dispatch.assert_called_once_with(entry.candidates[0])
 
 
-def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
-    """20.4 AppsFolder 실패 -> exe fallback: mock AppsFolder dispatch but no visible window -> exe -> visible window 발견. 두 candidate 각각 1회, exe 성공"""
+def test_open_app_explicit_shell_rejection_exe_fallback_success() -> None:
+    """A missing Shell handler may use one validated executable fallback."""
     appsfolder_cmd = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
     entry = AppEntry(
         name="Paint",
@@ -269,20 +269,17 @@ def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
         commands=[appsfolder_cmd, "mspaint.exe"],
     )
 
-    poll_count = 0
-    def mock_list():
-        nonlocal poll_count
-        poll_count += 1
-        # Initial checks (calls 1, 2) and Candidate 1 polling (calls 3 to 28): no window found
-        # During exe candidate polling (call > 28): window appears
-        if poll_count > 28:
-            return [{"hwnd": 556677, "title": "Paint", "process": "mspaint.exe", "active": True}]
-        return []
+    mock_win = {"hwnd": 556677, "title": "Paint", "process": "mspaint.exe", "active": True}
+    receipts = [
+        {"status": "rejected", "accepted": False, "backend": "shell-execute", "error_code": 1155, "fallback_eligible": True},
+        {"status": "accepted", "accepted": True, "backend": "process", "pid": 22},
+    ]
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
-         patch("scripts.lcu.windows.list_windows", side_effect=mock_list), \
+         patch("scripts.lcu.apps.dispatch_candidate", side_effect=receipts) as mock_dispatch, \
+         patch("scripts.lcu.windows.list_windows", return_value=[]), \
+         patch("scripts.lcu.apps._poll_for_launched_window", return_value=mock_win), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 556677, "title": "Paint"}) as mock_focus, \
          patch("time.sleep"):
         res = open_app("paint")
@@ -295,8 +292,8 @@ def test_open_app_appsfolder_fail_exe_fallback_success() -> None:
         assert mock_dispatch.call_args_list == [call(entry.candidates[0]), call(entry.candidates[1])]
 
 
-def test_open_app_all_candidates_fail() -> None:
-    """20.5 모든 candidate 실패: dispatch_failed 반환, 동일 command 반복 없음"""
+def test_open_app_two_explicit_dispatch_rejections() -> None:
+    """At most one alternate is attempted after an eligible rejection."""
     appsfolder_cmd = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
     entry = AppEntry(
         name="Paint",
@@ -309,19 +306,22 @@ def test_open_app_all_candidates_fail() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
+         patch("scripts.lcu.apps.dispatch_candidate", side_effect=[
+             {"status": "rejected", "accepted": False, "backend": "shell-execute", "error_code": 1155, "fallback_eligible": True},
+             {"status": "rejected", "accepted": False, "backend": "process", "error_code": 2, "fallback_eligible": True},
+         ]) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
          patch("time.sleep"):
         with pytest.raises(LCUError) as exc_info:
             open_app("paint")
-        assert exc_info.value.code == "dispatch_failed"
+        assert exc_info.value.code == "dispatch_rejected"
         assert mock_dispatch.call_args_list == [call(entry.candidates[0]), call(entry.candidates[1])]
         assert exc_info.value.attempts is not None
         assert len(exc_info.value.attempts) == 2
         assert exc_info.value.attempts[0]["target"] == appsfolder_cmd
-        assert exc_info.value.attempts[0]["result"] == "no_visible_window"
+        assert exc_info.value.attempts[0]["result"] == "dispatch_rejected"
         assert exc_info.value.attempts[1]["target"] == "mspaint.exe"
-        assert exc_info.value.attempts[1]["result"] == "no_visible_window"
+        assert exc_info.value.attempts[1]["result"] == "dispatch_rejected"
 
 
 def test_open_app_existing_minimized_window_reused() -> None:
@@ -358,8 +358,8 @@ def test_open_app_existing_minimized_window_reused() -> None:
         mock_start.assert_not_called()
 
 
-def test_open_app_multiple_existing_windows_no_arbitrary_focus() -> None:
-    """20.7 기존 창 여러 개: 임의 HWND 선택 금지, launch candidate 실행"""
+def test_open_app_multiple_existing_windows_is_ambiguous_without_dispatch() -> None:
+    """Multiple existing windows are returned for selection without launching."""
     entry = AppEntry(
         name="Chrome",
         target="chrome.exe",
@@ -370,30 +370,17 @@ def test_open_app_multiple_existing_windows_no_arbitrary_focus() -> None:
     )
     win1 = {"hwnd": 101, "title": "Chrome Window 1", "process": "chrome.exe", "active": False}
     win2 = {"hwnd": 102, "title": "Chrome Window 2", "process": "chrome.exe", "active": False}
-    win3 = {"hwnd": 103, "title": "Chrome Window 3", "process": "chrome.exe", "active": True}
-
-    call_count = 0
-    def mock_list_wins():
-        nonlocal call_count
-        call_count += 1
-        # Before launch: 2 windows
-        if call_count <= 2:
-            return [win1, win2]
-        # After launch: 3rd window appears
-        return [win1, win2, win3]
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
-         patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 103, "title": "Chrome Window 3"}) as mock_focus, \
-         patch("scripts.lcu.windows.list_windows", side_effect=mock_list_wins):
-        res = open_app("chrome")
-        # Should not have called focus_window prior to launching, but calls focus_window after detecting win3 (hwnd 103)
-        mock_dispatch.assert_called_once_with(entry.candidates[0])
-        mock_focus.assert_called_once_with(hwnd=103)
-        assert res["hwnd"] == 103
-        assert res["reused_existing"] is False
-        assert res["launch_method"] == "exe"
+         patch("scripts.lcu.windows.focus_window") as mock_focus, \
+         patch("scripts.lcu.windows.list_windows", return_value=[win1, win2]):
+        with pytest.raises(LCUError) as exc_info:
+            open_app("chrome")
+        assert exc_info.value.code == "ambiguous_target"
+        mock_dispatch.assert_not_called()
+        mock_focus.assert_not_called()
 
 
 def test_open_app_response_fields() -> None:
@@ -454,14 +441,16 @@ def test_build_app_index_cache_version_invalidation(tmp_path: Path) -> None:
         "commands": ["cached.exe"],
     }
 
+    fingerprint = {"config_path": "x", "config_sha256": "a", "path_sha256": "b", "user_sha256": "c"}
     with patch("scripts.lcu.apps.get_cache_file_path", return_value=cache_file), \
+         patch("scripts.lcu.apps.cache_fingerprint", return_value=fingerprint), \
          patch("scripts.lcu.apps.load_config_apps", return_value=[AppEntry.from_dict(entry_dict)]) as mock_load, \
          patch("scripts.lcu.apps.discover_start_menu_apps", return_value=[]), \
          patch("scripts.lcu.apps.discover_app_paths_apps", return_value=[]):
 
         # 1. Fresh cache with matching version
         cache_file.write_text(
-            json.dumps({"version": APP_INDEX_CACHE_VERSION, "timestamp": time.time(), "apps": [entry_dict]}),
+            json.dumps({"version": APP_INDEX_CACHE_VERSION, "timestamp": time.time(), "fingerprint": fingerprint, "apps": [entry_dict]}),
             encoding="utf-8",
         )
         res = build_app_index()
@@ -725,7 +714,7 @@ def test_structured_commands_loaded_from_apps_yaml() -> None:
     entries = load_config_apps(config_path)
     chrome_entry = next((e for e in entries if e.name == "chrome"), None)
     assert chrome_entry is not None
-    assert len(chrome_entry.candidates) == 1
+    assert len(chrome_entry.candidates) == 2
     # First candidate has priority 0 and args --new-window
     first_cand = chrome_entry.candidates[0]
     assert first_cand.target == "chrome.exe"
@@ -736,7 +725,7 @@ def test_structured_commands_loaded_from_apps_yaml() -> None:
 
     vscode_entry = next((e for e in entries if e.name == "vscode"), None)
     assert vscode_entry is not None
-    assert len(vscode_entry.candidates) == 1
+    assert len(vscode_entry.candidates) == 3
     first_code = vscode_entry.candidates[0]
     assert first_code.target == "code.exe"
     assert first_code.args == ("--new-window",)

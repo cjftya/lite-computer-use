@@ -6,8 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 from scripts.lcu.apps import (
-    APP_WINDOW_FAST_TIMEOUT,
-    APP_WINDOW_GRACE_TIMEOUT,
+    APP_WINDOW_TIMEOUT,
     AppEntry,
     LaunchCandidate,
     dispatch_candidate,
@@ -92,7 +91,7 @@ def test_dispatch_executable_uses_sanitized_env_and_detached_stdio(tmp_path: Pat
     assert result["sanitized_env_applied"] is True
 
 
-def test_candidate_dedupe_collapses_exe_and_cmd_but_keeps_shell_fallback() -> None:
+def test_candidate_dedupe_preserves_args_wrappers_and_shell_fallback() -> None:
     entry = AppEntry(
         name="vscode",
         target="code.exe",
@@ -109,6 +108,8 @@ def test_candidate_dedupe_collapses_exe_and_cmd_but_keeps_shell_fallback() -> No
 
     assert [(candidate.method, candidate.target) for candidate in entry.candidates] == [
         ("exe", "code.exe"),
+        ("exe", "code.exe"),
+        ("exe", "code.cmd"),
         ("start-menu", r"C:\Menu\Visual Studio Code.lnk"),
     ]
 
@@ -137,7 +138,7 @@ def test_chrome_window_match_rejects_gpt_pwa() -> None:
     )
 
 
-def test_staged_wait_uses_grace_when_new_process_is_alive() -> None:
+def test_shared_wait_does_not_depend_on_dispatcher_lifetime() -> None:
     identity = ProcessIdentity(101, 1, "Code.exe", None, 1000, 1)
     entry = AppEntry(
         name="vscode",
@@ -156,8 +157,7 @@ def test_staged_wait_uses_grace_when_new_process_is_alive() -> None:
         "active": True,
     }
 
-    with patch("scripts.lcu.apps.load_owned_processes", return_value=[]), patch(
-        "scripts.lcu.apps.build_app_index", return_value=[entry]
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]
     ), patch("scripts.lcu.apps.find_matching_windows", return_value=[]), patch(
         "scripts.lcu.windows.list_windows", return_value=[]
     ), patch(
@@ -166,12 +166,15 @@ def test_staged_wait_uses_grace_when_new_process_is_alive() -> None:
     ), patch(
         "scripts.lcu.apps.dispatch_candidate",
         return_value={
+            "status": "accepted",
+            "accepted": True,
+            "backend": "process",
             "sanitized_env_applied": True,
             "dispatch_identity": identity.to_dict(),
         },
     ), patch(
         "scripts.lcu.apps._poll_for_launched_window",
-        side_effect=[None, detected],
+        return_value=detected,
     ) as poll, patch(
         "scripts.lcu.windows.focus_window", return_value={"hwnd": 9001}
     ), patch("scripts.lcu.apps.remember_owned_processes"), patch("os.name", "nt"):
@@ -179,8 +182,7 @@ def test_staged_wait_uses_grace_when_new_process_is_alive() -> None:
 
     assert result["hwnd"] == 9001
     assert poll.call_args_list == [
-        call(entry, set(), APP_WINDOW_FAST_TIMEOUT),
-        call(entry, set(), APP_WINDOW_GRACE_TIMEOUT - APP_WINDOW_FAST_TIMEOUT),
+        call(entry, set(), APP_WINDOW_TIMEOUT),
     ]
 
 

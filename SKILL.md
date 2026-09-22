@@ -18,7 +18,8 @@ py -3.13 scripts\lcu.py <tool> [args]
 ## 1. Tool 목록 (Public Tools)
 
 ### Open & Discovery
-- `open_app <name> [--debug]`: Launch an application through deduplicated normalized-process / Windows Shell candidates, verify a visible window, and bring it to foreground. Executable launches apply the current narrow Electron/VS Code environment-drop policy; treat its root-cause status as unconfirmed until same-host A/B evidence exists. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and exact-dispatch-only `owned_processes`. Reuses and restores a single matching existing window automatically.
+- `open_app <name> [--debug]`: Resolve, inspect existing windows, dispatch once, observe, then focus. After Windows accepts a launch, never launch another candidate or kill a process because its window is late. `ok=true` requires a verified foreground window.
+- `app_status <attempt-id> [--timeout 0..30]`: Resume observation for an unconfirmed attempt without dispatching or terminating anything.
 - `open_file <absolute-path>`: Open file with default associated application.
 - `open_folder <absolute-path-or-alias>`: Open folder in Explorer (`desktop`, `documents`, `downloads`, `바탕화면`, `문서`, `다운로드`).
 - `open_url <url>`: Open `http://` or `https://` URL in default browser.
@@ -51,8 +52,12 @@ py -3.13 scripts\lcu.py <tool> [args]
 - `batch <json-array-or-file>`: Execute a sequence of deterministic actions with optional `delay_after`.
 
 ### Diagnostics
-- `doctor`: Check environment, Windows platform, dependencies, and desktop connection.
+- `doctor`: Check the platform, dependencies, desktop, active Python/module hashes, config fingerprint, and cache location.
 - `launch_context`: Report the selected shell/parent/session/desktop environment needed to compare PowerShell and Antigravity without exposing the full environment or PATH.
+
+### App launch state contract
+
+Use input tools only after `ready`. For `window_focus_failed`, retry focus only on the returned HWND. For `window_unconfirmed` or `dispatch_outcome_unknown`, use `app_status` or one necessary screen check and do not call `open_app` again. For `ambiguous_target` or `window_observation_failed`, report/select/fix observation without a raw shell fallback.
 
 ---
 
@@ -83,8 +88,8 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 2. **Discovery Tool** (`find_path`, `list_windows`, `focus_window`): 경로 및 창 식별에 우선 사용.
 3. **GUI Vision** (`screenshot` -> `batch`): Direct/Discovery로 해결할 수 없을 때만 최후에 사용.
 - **Direct Tool 성공 정의**: `open_app`은 단순 dispatch 성공이 아니라 검증된 `hwnd`(`MainWindowHandle`) 확보 및 foreground 포커스가 검증되어야 Task 완료로 판정합니다. 단일 기존 창이 존재하면 자동 restore/focus 후 `reused_existing=true`로 완료합니다.
-- **앱 실행 단일 호출**: 앱 실행 요청마다 `open_app <app>`은 정확히 1회만 호출합니다. `dispatch_failed` 뒤에 raw Bash 실행, `Start-Process`, `.lnk` 직접 실행, 동일 `open_app` 재호출을 이어 붙이지 않습니다. 후보 선택, executable-family dedupe, staged wait, rollback은 Python tool layer가 담당합니다.
-- **실패 판정**: `ok=true`와 유효한 `hwnd`가 함께 있어야 성공입니다. `dispatch_failed`이면 `attempts`를 읽고, 동일 실행군이 아닌 구조적으로 다른 복구가 명확할 때에만 전체 Failure Plan 범위 안에서 1회 복구합니다.
+- **앱 실행 단일 호출**: 앱 실행 요청마다 `open_app <app>`은 정확히 1회만 호출합니다. 실패 뒤에 raw Bash 실행, `Start-Process`, `.lnk` 직접 실행, 동일 `open_app` 재호출을 이어 붙이지 않습니다. 실행 접수 뒤 후보 재실행과 자동 rollback은 금지됩니다.
+- **실패 판정**: `ok=true`, 유효한 `hwnd`, `window_verified=true`, `foreground=true`가 함께 있어야 성공입니다. `window_unconfirmed` 또는 `dispatch_outcome_unknown`이면 같은 `attempt_id`를 `app_status`로만 재조회합니다.
 
 ### 2.3 Observation Boundary & Batching
 - **핵심 불변 규칙**:

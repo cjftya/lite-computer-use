@@ -34,6 +34,7 @@ DISALLOWED_BATCH_ACTIONS = {
     "get_clipboard",
     "get_mouse_position",
     "doctor",
+    "app_status",
 }
 
 

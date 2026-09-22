@@ -69,14 +69,17 @@ All tools speak standard JSON:
 
 ### 1. Open & Discovery
 ```powershell
-# Launch app by name or alias (deduplicated normalized process / Windows Shell candidates, verifies visible window)
+# Launch by name: resolve -> inspect existing -> dispatch once -> observe -> focus
 py -3.13 scripts\lcu.py open_app chrome
 py -3.13 scripts\lcu.py open_app notepad
 py -3.13 scripts\lcu.py open_app 계산기
 py -3.13 scripts\lcu.py open_app paint
 
-# Include timing, candidate count, rollback count, and safe launch diagnostics
+# Include stage timing and launch-context diagnostics
 py -3.13 scripts\lcu.py open_app vscode --debug
+
+# Resume observation without launching again (use an attempt_id from an error)
+py -3.13 scripts\lcu.py app_status 12345678-1234-1234-1234-123456789abc --timeout 10
 
 # Open file with default application (rejects executables/scripts)
 py -3.13 scripts\lcu.py open_file "C:\Users\me\Documents\report.pdf"
@@ -219,12 +222,14 @@ A/B confirmation, not a confirmed root cause. `NODE_OPTIONS` and other variable 
 remain untouched. Standard input/output/error are detached, and the launch working
 directory is the executable directory or the user profile fallback.
 
-Window readiness uses a 2.5-second fast stage and extends to an 8-second total deadline
-only when the exact dispatcher identity is still live. Rollback occurs after the final
-deadline and only for that exact dispatcher identity; an unrelated new same-name PID is
-never treated as owned.
-Executable wrappers from the same family (for example `code.exe` and `code.cmd`) are
-attempted once; a structurally different Windows Shell shortcut may remain as fallback.
+Window readiness uses one shared 10-second observation budget, including Shell/URI and
+fast-exiting handoff launchers. Once dispatch is accepted or its outcome is unknown, no
+other candidate is launched and no process is killed. `app_status` can resume observation
+for the same attempt without dispatch. A validated missing-file or missing-handler rejection
+may use at most one alternate specification.
+
+Launch-spec deduplication includes kind, full normalized target, arguments, and working
+directory. Different installations, wrappers, or argument sets are not collapsed by stem.
 
 Only exact executable dispatcher identities can be recorded as LCU-owned in
 `%TEMP%\LiteComputerUse\owned-processes.json`. Shell, shortcut, URI, broker, and

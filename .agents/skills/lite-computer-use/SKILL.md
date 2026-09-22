@@ -18,7 +18,8 @@ py -3.13 scripts\lcu.py <tool> [args]
 ## 1. Tool 목록 (Public Tools)
 
 ### Open & Discovery
-- `open_app <name>`: Launch application with priority strategy (AppsFolder -> Start Menu -> URI -> App Paths -> direct exe), verify visible window, and bring to foreground. Returns verified `hwnd`, `launch_method`, `reused_existing`, `window_pid`, `window_process`, and `owned_processes` (tracking newly created processes under process ownership model). Reuses and restores single existing window automatically.
+- `open_app <name> [--debug]`: Resolve, inspect existing windows, dispatch once, observe, then focus. After Windows accepts a launch, never launch another candidate or kill a process because its window is late. `ok=true` requires a verified foreground window.
+- `app_status <attempt-id> [--timeout 0..30]`: Resume observation for an unconfirmed attempt without dispatching or terminating anything.
 - `open_file <absolute-path>`: Open file with default associated application.
 - `open_folder <absolute-path-or-alias>`: Open folder in Explorer (`desktop`, `documents`, `downloads`, `바탕화면`, `문서`, `다운로드`).
 - `open_url <url>`: Open `http://` or `https://` URL in default browser.
@@ -51,7 +52,12 @@ py -3.13 scripts\lcu.py <tool> [args]
 - `batch <json-array-or-file>`: Execute a sequence of deterministic actions with optional `delay_after`.
 
 ### Diagnostics
-- `doctor`: Check environment, Windows platform, dependencies, and desktop connection.
+- `doctor`: Check the platform, dependencies, desktop, active Python/module hashes, config fingerprint, and cache location.
+- `launch_context`: Report the selected shell/parent/session/desktop environment needed to compare PowerShell and Antigravity without exposing the full environment or PATH.
+
+### App launch state contract
+
+Use input tools only after `ready`. For `window_focus_failed`, retry focus only on the returned HWND. For `window_unconfirmed` or `dispatch_outcome_unknown`, use `app_status` or one necessary screen check and do not call `open_app` again. For `ambiguous_target` or `window_observation_failed`, report/select/fix observation without a raw shell fallback.
 
 ---
 
@@ -82,6 +88,8 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
 2. **Discovery Tool** (`find_path`, `list_windows`, `focus_window`): 경로 및 창 식별에 우선 사용.
 3. **GUI Vision** (`screenshot` -> `batch`): Direct/Discovery로 해결할 수 없을 때만 최후에 사용.
 - **Direct Tool 성공 정의**: `open_app`은 단순 dispatch 성공이 아니라 검증된 `hwnd`(`MainWindowHandle`) 확보 및 foreground 포커스가 검증되어야 Task 완료로 판정합니다. 단일 기존 창이 존재하면 자동 restore/focus 후 `reused_existing=true`로 완료합니다.
+- **앱 실행 단일 호출**: 앱 실행 요청마다 `open_app <app>`은 정확히 1회만 호출합니다. 실패 뒤에 raw Bash 실행, `Start-Process`, `.lnk` 직접 실행, 동일 `open_app` 재호출을 이어 붙이지 않습니다. 실행 접수 뒤 후보 재실행과 자동 rollback은 금지됩니다.
+- **실패 판정**: `ok=true`, 유효한 `hwnd`, `window_verified=true`, `foreground=true`가 함께 있어야 성공입니다. `window_unconfirmed` 또는 `dispatch_outcome_unknown`이면 같은 `attempt_id`를 `app_status`로만 재조회합니다.
 
 ### 2.3 Observation Boundary & Batching
 - **핵심 불변 규칙**:
@@ -118,7 +126,7 @@ AI 에이전트는 복잡한 요청을 수행할 때 다음 오케스트레이�
   2. `reused_existing` 필드가 누락되었거나 `focus_window` 결과 등 소유권이 불명확한 창
   3. 사용자의 최종 결과로 남겨야 하는 창 (예: "메모장에 결과를 적어줘" 요청의 메모장)
   4. 기존 브라우저 창 또는 탭
-  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 이번 launch에서 새로 생성된 것이 입증된 `owned_processes`만 엄격한 안전성 검증(PID reuse 방지, denylist 제외, 타 창 미소유)을 통과한 후 정리됩니다.
+  5. **기존 사용자 프로세스 및 시스템 프로세스**: `taskkill /IM`, `Stop-Process -Name` 등 이름 기반의 일괄 강제 종료는 절대 금지됩니다. 오직 exact executable dispatch identity로 입증된 `owned_processes`만 PID + creation time + image + session + 타 창 검증을 통과한 뒤 정리됩니다. Shell/shortcut/URI/broker 및 새 same-name PID는 소유하지 않습니다. `%TEMP%\LiteComputerUse\owned-processes.json`의 live evidence가 없는 caller JSON도 종료 권한을 부여하지 않습니다.
 - **종료 순서**:
   여러 앱을 실행한 경우 최근에 실행한 앱부터 **역순**으로 닫습니다.
 - **Cleanup 실패 처리**:

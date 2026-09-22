@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -45,6 +46,18 @@ def run_doctor() -> dict[str, Any]:
             ok = False
     checks["dependencies"] = deps
 
+    # Runtime provenance: useful when multiple installed skill copies exist.
+    entrypoint = Path(__file__).resolve()
+    apps_module = Path(apps.__file__).resolve()
+    checks["runtime"] = {
+        "python": sys.executable,
+        "entrypoint": str(entrypoint),
+        "entrypoint_sha256": hashlib.sha256(entrypoint.read_bytes()).hexdigest(),
+        "apps_module": str(apps_module),
+        "apps_module_sha256": hashlib.sha256(apps_module.read_bytes()).hexdigest(),
+        "app_index": apps.get_app_index_diagnostics(),
+    }
+
     # 4. Desktop attach
     capture.init_windows_environment()
     checks["dpi_initialized"] = True
@@ -80,6 +93,10 @@ def main() -> None:
     p_open_app = subparsers.add_parser("open_app")
     p_open_app.add_argument("name", help="App name or alias")
     p_open_app.add_argument("--debug", action="store_true", help="Include launch timing and context diagnostics")
+
+    p_app_status = subparsers.add_parser("app_status")
+    p_app_status.add_argument("attempt_id", help="Attempt id returned by open_app")
+    p_app_status.add_argument("--timeout", type=float, default=0.0, help="Observe for up to 30 seconds without launching")
 
     p_open_file = subparsers.add_parser("open_file")
     p_open_file.add_argument("path", help="Absolute path to file")
@@ -224,6 +241,12 @@ def main() -> None:
         elif action == "open_app":
             res = apps.open_app(args.name, debug=args.debug)
             print(output_json(format_success("open_app", res)))
+
+        elif action == "app_status":
+            if args.timeout < 0 or args.timeout > 30:
+                raise LCUError("invalid_arguments", "app_status --timeout must be between 0 and 30 seconds")
+            res = apps.app_status(args.attempt_id, timeout=args.timeout)
+            print(output_json(format_success("app_status", res)))
 
         elif action == "open_file":
             res = direct.open_file(args.path)
