@@ -4,7 +4,8 @@ Date: 2026-09-22
 Analysis baseline: `1c7f7afc932060530047cc6b7f9a9ca079d7edcb`
 Local `main` ref before edits: `1c7f7afc932060530047cc6b7f9a9ca079d7edcb`
 Remote-tracking `origin/main` before commit: `1c7f7afc932060530047cc6b7f9a9ca079d7edcb`
-Status: implementation present in the working tree; Windows acceptance pending
+Implementation commit: `15632b3`
+Status: committed to local `main`; Windows acceptance pending
 
 ## Implemented contract
 
@@ -62,17 +63,20 @@ prevents later input actions.
 4. one alternate only after an eligible explicit rejection;
 5. observation-error propagation;
 6. no dispatch after existing-window focus failure; and
-7. zero dispatch from `app_status`.
+7. zero dispatch from `app_status`;
+8. sensitive launch arguments omitted from attempt state;
+9. same-alias discovered installations remain distinct; and
+10. stale absolute targets refresh once without dispatch.
 
-Static byte-for-byte comparison confirmed the three skill instruction copies are equal.
+Static line comparison confirmed the three skill instruction copies are equal.
 The initial edited modules compiled successfully before the final documentation and
 registry-view changes. A final Python/pytest run could not be executed because the current
 host exposes `C:\Windows\py.exe` but reports `No installed Python found`, and no `python`,
 `python3`, or repository virtual-environment interpreter is available.
 
-Git status/diff and requested commits are also pending: Git rejects this checkout as an
-unsafe repository due to owner mismatch. A request to persistently add the workspace to
-the global `safe.directory` trust list was denied, so the security check was not bypassed.
+Git diff validation completed with no whitespace errors. The implementation was committed
+to local `main`; unrelated pre-existing PowerShell/Antigravity diagnostic JSON files were
+left untracked and were not included.
 
 ## Windows acceptance still required
 
