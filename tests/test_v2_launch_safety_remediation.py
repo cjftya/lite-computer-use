@@ -96,9 +96,10 @@ def test_s01_untrusted_baseline_disables_ownership() -> None:
         },
     ), patch(
         "scripts.lcu.apps._poll_for_launched_window", return_value=detected
+    ), patch("scripts.lcu.apps._recheck_window", return_value=True
     ), patch(
         "scripts.lcu.windows.focus_window", return_value={"hwnd": 9001}
-    ), patch("scripts.lcu.apps.remember_owned_processes"), patch(
+    ), patch("scripts.lcu.apps.save_app_attempt"), patch("scripts.lcu.apps.remember_owned_processes"), patch(
         "scripts.lcu.apps.get_launch_context_snapshot", return_value={}
     ), patch("os.name", "nt"):
         result = open_app("vscode", debug=True)
@@ -175,9 +176,10 @@ def test_l02_identity_lookup_error_preserves_record_but_never_authorizes(tmp_pat
             "hwnd": 9001,
             "window_pid": 101,
             "ownership_evidence": "exact-dispatch-identity",
+            "dispatch_backend": "process",
         }
     )
-    ledger.write_text(json.dumps({"version": 1, "records": [record]}), encoding="utf-8")
+    ledger.write_text(json.dumps({"version": 2, "records": [record]}), encoding="utf-8")
 
     with patch("scripts.lcu.ownership.get_ledger_path", return_value=ledger), patch(
         "scripts.lcu.ownership.is_same_process", return_value=None

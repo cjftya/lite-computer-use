@@ -108,9 +108,9 @@ def test_candidate_dedupe_preserves_args_wrappers_and_shell_fallback() -> None:
 
     assert [(candidate.method, candidate.target) for candidate in entry.candidates] == [
         ("exe", "code.exe"),
+        ("start-menu", r"C:\Menu\Visual Studio Code.lnk"),
         ("exe", "code.exe"),
         ("exe", "code.cmd"),
-        ("start-menu", r"C:\Menu\Visual Studio Code.lnk"),
     ]
 
 
@@ -132,7 +132,7 @@ def test_chrome_window_match_rejects_gpt_pwa() -> None:
         {"title": "ChatGPT", "process": "chrome.exe"},
         entry,
     )
-    assert is_matching_window(
+    assert not is_matching_window(
         {"title": "New Tab - Google Chrome", "process": "chrome.exe"},
         entry,
     )
@@ -177,7 +177,9 @@ def test_shared_wait_does_not_depend_on_dispatcher_lifetime() -> None:
         return_value=detected,
     ) as poll, patch(
         "scripts.lcu.windows.focus_window", return_value={"hwnd": 9001}
-    ), patch("scripts.lcu.apps.remember_owned_processes"), patch("os.name", "nt"):
+    ), patch("scripts.lcu.apps.save_app_attempt"), patch("scripts.lcu.apps.remember_owned_processes"), patch(
+        "scripts.lcu.apps._recheck_window", return_value=True
+    ), patch("os.name", "nt"):
         result = open_app("vscode")
 
     assert result["hwnd"] == 9001
@@ -198,6 +200,7 @@ def test_process_ownership_ledger_revalidates_and_finds_window(tmp_path: Path) -
     ).to_dict()
     process["cleanup_mode"] = "owned-after-close"
     process["ownership_evidence"] = "exact-dispatch-identity"
+    process["dispatch_backend"] = "process"
 
     with patch("scripts.lcu.ownership.get_ledger_path", return_value=ledger_path), patch(
         "scripts.lcu.ownership.is_same_process", return_value=True
@@ -216,7 +219,7 @@ def test_process_ownership_ledger_prunes_pid_reuse(tmp_path: Path) -> None:
     ledger_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "records": [
                     {
                         "pid": 456,

@@ -117,12 +117,44 @@ def get_process_name_for_pid(pid: int) -> str | None:
     return None
 
 
+def get_app_user_model_id(pid: int) -> str | None:
+    if os.name != "nt":
+        return None
+    kernel32 = ctypes.windll.kernel32
+    from .processes import _configure_kernel32
+    _configure_kernel32(kernel32)
+    try:
+        kernel32.GetApplicationUserModelId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR]
+        kernel32.GetApplicationUserModelId.restype = wintypes.LONG
+    except AttributeError:
+        return None
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(0)
+        kernel32.GetApplicationUserModelId(handle, ctypes.byref(size), None)
+        if size.value < 2 or size.value > 4096:
+            return None
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if kernel32.GetApplicationUserModelId(handle, ctypes.byref(size), buffer) == 0:
+            return buffer.value or None
+    except (AttributeError, OSError):
+        pass
+    finally:
+        kernel32.CloseHandle(handle)
+    return None
+
+
 def list_windows(query: str | None = None) -> list[dict[str, Any]]:
     init_windows_environment()
     import win32gui
     import win32process
 
     windows: list[dict[str, Any]] = []
+    from .processes import get_process_identity
+    identities: dict[int, Any] = {}
+    app_ids: dict[int, str | None] = {}
     fg_hwnd = win32gui.GetForegroundWindow()
 
     def enum_proc(hwnd: int, _: Any) -> bool:
@@ -147,6 +179,10 @@ def list_windows(query: str | None = None) -> list[dict[str, Any]]:
         # Process name
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         proc_name = get_process_name_for_pid(pid) or ""
+        if pid not in identities:
+            identities[pid] = get_process_identity(pid)
+            app_ids[pid] = get_app_user_model_id(pid)
+        identity = identities[pid]
 
         # Query filter
         if query:
@@ -163,6 +199,11 @@ def list_windows(query: str | None = None) -> list[dict[str, Any]]:
                 "pid": pid,
                 "title": title,
                 "process": proc_name,
+                "image_path": identity.image_path if identity else None,
+                "session_id": identity.session_id if identity else None,
+                "creation_time": identity.creation_time if identity else None,
+                "app_user_model_id": app_ids[pid],
+                "class_name": win32gui.GetClassName(hwnd),
                 "active": is_active,
                 "minimized": is_min,
                 "bounds": {
@@ -190,11 +231,18 @@ def find_target_window(query: str | None = None, hwnd: int | None = None) -> dic
         rect = win32gui.GetWindowRect(hwnd)
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         proc = get_process_name_for_pid(pid) or ""
+        from .processes import get_process_identity
+        identity = get_process_identity(pid)
         return {
             "hwnd": hwnd,
             "pid": pid,
             "title": title,
             "process": proc,
+            "image_path": identity.image_path if identity else None,
+            "session_id": identity.session_id if identity else None,
+            "creation_time": identity.creation_time if identity else None,
+            "app_user_model_id": get_app_user_model_id(pid),
+            "class_name": win32gui.GetClassName(hwnd),
             "active": (hwnd == win32gui.GetForegroundWindow()),
             "minimized": bool(win32gui.IsIconic(hwnd)),
             "bounds": {"x": rect[0], "y": rect[1], "width": rect[2] - rect[0], "height": rect[3] - rect[1]},

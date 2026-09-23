@@ -228,14 +228,25 @@ other candidate is launched and no process is killed. `app_status` can resume ob
 for the same attempt without dispatch. A validated missing-file or missing-handler rejection
 may use at most one alternate specification.
 
+Window titles are only supporting hints. A window needs a matching executable image
+path or verified package identity; an unavailable image lookup leaves it unconfirmed.
+Browser and PWA windows sharing a process cannot be distinguished by process name
+and tab title, so ambiguous cases remain unconfirmed. A reused HWND/PID is checked
+again immediately before focus. `app_status` observes only: `window_found` is not
+foreground readiness, and `dispatch_accepted` remains `null` for an unknown outcome.
+Only dispatched attempts with saved observation state have queryable IDs.
+
 Launch-spec deduplication includes kind, full normalized target, arguments, and working
 directory. Different installations, wrappers, or argument sets are not collapsed by stem.
 
-Only exact executable dispatcher identities can be recorded as LCU-owned in
+Only exact direct-process dispatcher identities can be recorded as LCU-owned in
 `%TEMP%\LiteComputerUse\owned-processes.json`. Shell, shortcut, URI, broker, and
 same-name-only observations remain unowned. Later cleanup requires live ledger evidence
 plus PID, creation time, image, session, and window checks. Lookup errors fail closed and
 the ledger never authorizes process-name-wide termination.
+Shell/URI/shortcut/packaged activation handles and PIDs are observations, never
+process ownership. Old ledger version 1 records are ignored because their dispatch
+backend cannot be established.
 
 ### Real Windows Smoke Test Suite
 Launches a live Tkinter GUI fixture with known button and canvas targets, captures screenshots across presets, resolves coordinates, tests hits, drags, and batch actions:

@@ -316,76 +316,80 @@ def _can_merge_discovered_entry(existing: AppEntry, discovered: AppEntry) -> boo
     return not any(candidate.source == discovered.source for candidate in existing.candidates)
 
 
-def is_matching_window(win: dict[str, Any], entry: AppEntry) -> bool:
+def window_match_status(win: dict[str, Any], entry: AppEntry) -> str:
+    """Return match, no_match, or insufficient_evidence without trusting titles alone."""
     title = win.get("title", "").strip().lower()
     proc = win.get("process", "").strip().lower()
+    image = str(win.get("image_path") or "").strip()
+    if not win.get("hwnd") or not win.get("pid"):
+        return "insufficient_evidence"
 
-    configured_match = entry.window_match
-    if configured_match:
-        process_names = {
-            str(name).strip().lower()
-            for name in configured_match.get("process_names", [])
-            if str(name).strip()
-        }
-        title_contains_any = [
-            str(value).strip().lower()
-            for value in configured_match.get("title_contains_any", [])
-            if str(value).strip()
-        ]
-        title_equals_any = {
-            str(value).strip().lower()
-            for value in configured_match.get("title_equals_any", [])
-            if str(value).strip()
-        }
-        if process_names and proc not in process_names:
-            return False
-        if title_contains_any and not any(value in title for value in title_contains_any):
-            return False
-        if title_equals_any and title not in title_equals_any:
-            return False
-        return bool(process_names or title_contains_any or title_equals_any)
-
-    known_exes = set()
+    expected_paths: set[str] = set()
+    known_exes: set[str] = set()
     for cand in entry.candidates:
-        t = cand.target.strip().lower()
-        if t.endswith(".exe"):
-            known_exes.add(ntpath.basename(t).lower())
-        shortcut_target = str(cand.expected_identity.get("target_path", "")).strip().lower()
-        if shortcut_target.endswith(".exe"):
-            known_exes.add(ntpath.basename(shortcut_target).lower())
-    if not known_exes:
-        known_exes.add(f"{entry.normalized}.exe")
-        known_exes.add(f"{entry.name.lower()}.exe")
-
-    # 1. Process matching
-    if proc and proc in known_exes:
-        return True
-
-    # 2. Title matching
-    queries = [entry.name.lower()] + [a.lower() for a in entry.aliases]
-    valid_queries = [q for q in queries if len(q) >= 2]
-
-    for q in valid_queries:
-        if q == title or (len(q) >= 3 and q in title):
-            # Ignore common development tools matching title unless the entry itself is that tool
-            if entry.normalized not in (
-                "explorer",
-                "visualstudiocode",
-                "code",
-                "cmd",
-                "powershell",
-                "windowsterminal",
-            ) and proc in (
-                "code.exe",
-                "explorer.exe",
-                "windowsterminal.exe",
-                "cmd.exe",
-                "powershell.exe",
-            ):
+        for path in (cand.target, cand.expected_identity.get("target_path", "")):
+            path = str(path).strip().strip('"')
+            if not path.lower().endswith(".exe"):
                 continue
-            return True
+            known_exes.add(ntpath.basename(path).casefold())
+            if ntpath.isabs(path):
+                expected_paths.add(ntpath.normcase(ntpath.normpath(path)))
+            elif os.name == "nt":
+                resolved = resolve_executable(path)
+                if ntpath.isabs(resolved):
+                    expected_paths.add(ntpath.normcase(ntpath.normpath(resolved)))
+    configured_match = entry.window_match
+    process_names = {str(p).casefold() for p in configured_match.get("process_names", [])}
+    known_exes.update(process_names)
+    package_ids = {
+        c.target.split("\\", 1)[1].casefold()
+        for c in entry.candidates
+        if c.target.lower().startswith("shell:appsfolder\\")
+    }
+    observed_id = str(win.get("app_user_model_id") or "").casefold()
+    package_verified = bool(package_ids and observed_id in package_ids)
+    if observed_id and package_ids and not package_verified:
+        return "no_match"
+    if not known_exes:
+        known_exes.update({f"{entry.normalized}.exe", f"{entry.name.lower()}.exe"})
+    packaged_runtime = any(c.method in {"appsfolder", "uri"} for c in entry.candidates)
+    if image and expected_paths and not package_verified:
+        if ntpath.normcase(ntpath.normpath(image)) not in expected_paths:
+            return "no_match"
+    elif expected_paths and not package_verified:
+        return "insufficient_evidence"
+    if image and ntpath.basename(image).casefold() not in known_exes and not package_verified:
+        return "no_match"
+    if proc and proc not in known_exes and not package_verified:
+        return "no_match"
+    if not image or win.get("session_id") is None:
+        return "insufficient_evidence"
+    if os.name == "nt":
+        from .processes import get_current_session_id
+        current_session = get_current_session_id()
+        if current_session is None:
+            return "insufficient_evidence"
+        if win["session_id"] != current_session:
+            return "no_match"
+    if packaged_runtime and expected_paths and not package_verified and proc in process_names:
+        return "insufficient_evidence"
 
-    return False
+    # A browser's process and tab title do not prove it is a normal window
+    # rather than an installed web app running under the same executable.
+    if entry.normalized in {"chrome", "edge", "firefox"}:
+        return "insufficient_evidence"
+    if configured_match:
+        contains = [str(v).lower() for v in configured_match.get("title_contains_any", [])]
+        equals = [str(v).lower() for v in configured_match.get("title_equals_any", [])]
+        if contains and not any(v in title for v in contains):
+            return "no_match"
+        if equals and title not in equals:
+            return "no_match"
+    return "match" if (proc or image) else "insufficient_evidence"
+
+
+def is_matching_window(win: dict[str, Any], entry: AppEntry) -> bool:
+    return window_match_status(win, entry) == "match"
 
 
 def find_matching_windows(
@@ -775,6 +779,17 @@ def _window_candidate(window: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _recheck_window(win: dict[str, Any], entry: AppEntry) -> bool:
+    """Do not focus a recycled HWND or a PID that changed since enumeration."""
+    from .windows import list_windows
+    current = next((w for w in list_windows() if w.get("hwnd") == win.get("hwnd")), None)
+    return bool(
+        current and current.get("pid") == win.get("pid")
+        and current.get("creation_time") == win.get("creation_time")
+        and window_match_status(current, entry) == "match"
+    )
+
+
 def _error_details(
     *, attempt_id: str, stage: str, dispatch_accepted: bool | None,
     hwnd: int | None = None, window_pid: int | None = None,
@@ -789,6 +804,10 @@ def _error_details(
         "foreground": False,
         "retry_launch_allowed": False,
     }
+
+
+def _dispatch_accepted(status: Any) -> bool | None:
+    return True if status == "accepted" else False if status == "rejected" else None
 
 
 def _coerce_receipt(info: dict[str, Any], elapsed_ms: float) -> dict[str, Any]:
@@ -863,6 +882,12 @@ def open_app(
         if refreshed_entry is not None and not refreshed_candidates:
             entry = refreshed_entry
 
+    if entry.candidates and all(_candidate_target_is_stale(c) for c in entry.candidates):
+        raise LCUError(
+            "target_not_found", f"All resolved launch targets for '{name}' are stale",
+            details=_error_details(attempt_id=attempt_id, stage="resolve", dispatch_accepted=False),
+        )
+
     # Phase 6: Pre-check for existing window
     from .windows import focus_window, list_windows
     try:
@@ -889,6 +914,8 @@ def open_app(
     if len(existing_windows) == 1:
         target_win = existing_windows[0]
         try:
+            if not _recheck_window(target_win, entry):
+                raise ValueError("Window identity changed before focus")
             focus_window(hwnd=target_win.get("hwnd"))
             win_pid = target_win.get("pid")
             win_proc = target_win.get("process", "")
@@ -1030,7 +1057,27 @@ def open_app(
             details=_error_details(attempt_id=attempt_id, stage="dispatch", dispatch_accepted=False),
         )
 
-    dispatch_accepted = True if receipt["status"] == "accepted" else None
+    dispatch_accepted = _dispatch_accepted(receipt.get("status"))
+    # An attempt ID is only advertised after observation state is persisted.
+    try:
+        save_app_attempt(
+            attempt_id,
+            {
+                "entry": _entry_for_attempt(entry), "baseline_hwnds": sorted(before_hwnds),
+                "dispatch": {
+                    "status": receipt.get("status"), "backend": receipt.get("backend"),
+                    "pid": receipt.get("pid"), "elapsed_ms": receipt.get("elapsed_ms"),
+                },
+            },
+        )
+    except OSError as exc:
+        raise LCUError(
+            "attempt_state_unavailable", "Launch outcome cannot be observed through app_status",
+            details={**_error_details(attempt_id=attempt_id, stage="observe",
+                                      dispatch_accepted=dispatch_accepted),
+                     "observation_error": f"{type(exc).__name__}: {exc}",
+                     "attempt_queryable": False},
+        ) from exc
     window_wait_started_at = time.monotonic()
     try:
         detected_win = _poll_for_launched_window(entry, before_hwnds, APP_WINDOW_TIMEOUT)
@@ -1047,6 +1094,8 @@ def open_app(
     if detected_win is not None:
             detected_hwnd = detected_win.get("hwnd", 0)
             try:
+                if not _recheck_window(detected_win, entry):
+                    raise ValueError("Window identity changed before focus")
                 focus_window(hwnd=detected_hwnd)
             except Exception as exc:
                 raise LCUError(
@@ -1080,9 +1129,9 @@ def open_app(
                 dispatch_identity = ProcessIdentity.from_dict(raw_dispatch_identity) if isinstance(raw_dispatch_identity, dict) else None
             except (KeyError, TypeError, ValueError):
                 dispatch_identity = None
-            if baseline_trusted and not is_reused and dispatch_identity is not None and (
+            if receipt.get("backend") == "process" and baseline_trusted and not is_reused and dispatch_identity is not None and (
                 win_pid is None or win_pid not in baseline_pids
-            ):
+            ) and dispatch_identity.pid not in baseline_pids and dispatch_identity.creation_time is not None and dispatch_identity.session_id is not None and dispatch_identity.image_path:
                 try:
                     after_processes = snapshot_processes()
                 except Exception:
@@ -1092,10 +1141,14 @@ def open_app(
                     snapshot_is_complete(after_processes)
                     and live_dispatcher is not None
                     and live_dispatcher.creation_time == dispatch_identity.creation_time
+                    and live_dispatcher.session_id == dispatch_identity.session_id
+                    and live_dispatcher.image_path is not None
+                    and ntpath.normcase(live_dispatcher.image_path) == ntpath.normcase(dispatch_identity.image_path)
                 ):
                     p_dict = dispatch_identity.to_dict()
                     p_dict["cleanup_mode"] = success_cleanup
                     p_dict["ownership_evidence"] = "exact-dispatch-identity"
+                    p_dict["dispatch_backend"] = "process"
                     owned_processes.append(p_dict)
 
             successful_result: dict[str, Any] = {
@@ -1115,12 +1168,13 @@ def open_app(
                 "foreground": True,
             }
             try:
-                remember_owned_processes(
+                if owned_processes:
+                    remember_owned_processes(
                     app=entry.name,
                     hwnd=int(detected_hwnd),
                     window_pid=int(win_pid) if win_pid is not None else None,
                     owned_processes=owned_processes,
-                )
+                    )
             except Exception:
                 pass
             if debug:
@@ -1139,16 +1193,6 @@ def open_app(
                 }
             return successful_result
 
-    save_app_attempt(
-        attempt_id,
-        {
-            "entry": _entry_for_attempt(entry), "baseline_hwnds": sorted(before_hwnds),
-            "dispatch": {
-                "status": receipt.get("status"), "backend": receipt.get("backend"),
-                "pid": receipt.get("pid"), "elapsed_ms": receipt.get("elapsed_ms"),
-            },
-        },
-    )
     error_code = "window_unconfirmed" if dispatch_accepted is True else "dispatch_outcome_unknown"
     raise LCUError(
         error_code,
@@ -1178,12 +1222,12 @@ def app_status(attempt_id: str, timeout: float = 0.0) -> dict[str, Any]:
     if detected is None:
         return {
             "attempt_id": attempt_id, "stage": "observe", "status": "window_unconfirmed",
-            "dispatch_accepted": payload.get("dispatch", {}).get("status") == "accepted",
+            "dispatch_accepted": _dispatch_accepted(payload.get("dispatch", {}).get("status")),
             "window_verified": False, "foreground": False, "retry_launch_allowed": False,
         }
     return {
         "attempt_id": attempt_id, "stage": "observe", "status": "window_found",
-        "dispatch_accepted": payload.get("dispatch", {}).get("status") == "accepted",
+        "dispatch_accepted": _dispatch_accepted(payload.get("dispatch", {}).get("status")),
         "hwnd": detected.get("hwnd"), "window_pid": detected.get("pid"),
         "window_verified": True, "foreground": bool(detected.get("active")),
         "title": detected.get("title", ""), "process": detected.get("process", ""),

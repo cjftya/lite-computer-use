@@ -100,7 +100,12 @@ def dispatch_process(spec: LaunchSpec, resolved: str) -> DispatchReceipt:
             fallback_eligible=code in {2, 3},
             sanitized_env_applied=True,
         )
-    identity = get_process_identity(process.pid) if os.name == "nt" else None
+    try:
+        identity = get_process_identity(process.pid) if os.name == "nt" else None
+        observation_error = None
+    except Exception as exc:
+        identity = None
+        observation_error = f"identity lookup: {type(exc).__name__}: {exc}"
     return DispatchReceipt(
         status="accepted",
         backend="process",
@@ -108,6 +113,7 @@ def dispatch_process(spec: LaunchSpec, resolved: str) -> DispatchReceipt:
         pid=process.pid,
         dispatch_identity=identity.to_dict() if identity is not None else None,
         resolved=resolved,
+        message=observation_error,
         sanitized_env_applied=True,
     )
 
@@ -143,42 +149,83 @@ def dispatch_shell(spec: LaunchSpec) -> DispatchReceipt:
     info.lpParameters = params
     info.lpDirectory = spec.cwd
     info.nShow = SW_SHOWNORMAL
-    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
-    shell32.ShellExecuteExW.restype = wintypes.BOOL
-    ctypes.set_last_error(0)
+    initialized = False
     try:
-        ok = shell32.ShellExecuteExW(ctypes.byref(info))
+        import pythoncom
+        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+        initialized = True
     except Exception as exc:
         return DispatchReceipt(
-            "unknown", "shell-execute", round((time.monotonic() - started) * 1000, 1),
+            "rejected", "shell-execute", round((time.monotonic() - started) * 1000, 1),
             error_type=type(exc).__name__, message=str(exc), fallback_eligible=False,
         )
-    if not ok:
-        code = ctypes.get_last_error()
-        return DispatchReceipt(
-            "rejected", "shell-execute", round((time.monotonic() - started) * 1000, 1),
-            error_code=code, error_type="WinError", message=ctypes.FormatError(code),
-            fallback_eligible=code in {2, 3, 1155},
-        )
-    pid: int | None = None
-    if info.hProcess:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
-        kernel32.GetProcessId.restype = wintypes.DWORD
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
+    try:
         try:
-            raw_pid = kernel32.GetProcessId(info.hProcess)
-            pid = int(raw_pid) if raw_pid else None
+            shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+            shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+            shell32.ShellExecuteExW.restype = wintypes.BOOL
+            ctypes.set_last_error(0)
+        except Exception as exc:
+            return DispatchReceipt(
+                "rejected", "shell-execute", round((time.monotonic() - started) * 1000, 1),
+                error_type=type(exc).__name__, message=str(exc), fallback_eligible=False,
+            )
+        try:
+            ok = shell32.ShellExecuteExW(ctypes.byref(info))
+        except Exception as exc:
+            return DispatchReceipt(
+                "unknown", "shell-execute", round((time.monotonic() - started) * 1000, 1),
+                error_type=type(exc).__name__, message=str(exc), fallback_eligible=False,
+            )
+        if not ok:
+            code = ctypes.get_last_error()
+            return DispatchReceipt(
+                "rejected", "shell-execute", round((time.monotonic() - started) * 1000, 1),
+                error_code=code, error_type="WinError", message=ctypes.FormatError(code),
+                fallback_eligible=code in {2, 3, 1155},
+            )
+        pid: int | None = None
+        identity = None
+        observation_error = None
+        try:
+            if info.hProcess:
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+                kernel32.GetProcessId.restype = wintypes.DWORD
+                raw_pid = kernel32.GetProcessId(info.hProcess)
+                pid = int(raw_pid) if raw_pid else None
+                identity = get_process_identity(pid) if pid is not None else None
+        except Exception as exc:
+            observation_error = f"{type(exc).__name__}: {exc}"
         finally:
-            kernel32.CloseHandle(info.hProcess)
-    identity = get_process_identity(pid) if pid is not None else None
-    return DispatchReceipt(
-        "accepted", "shell-execute", round((time.monotonic() - started) * 1000, 1),
-        pid=pid, dispatch_identity=identity.to_dict() if identity is not None else None,
-        resolved=spec.target,
-    )
+            if info.hProcess:
+                try:
+                    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+                    kernel32.CloseHandle.restype = wintypes.BOOL
+                    kernel32.CloseHandle(info.hProcess)
+                    info.hProcess = None
+                except Exception as exc:
+                    observation_error = f"handle close: {type(exc).__name__}: {exc}"
+        return DispatchReceipt(
+            "accepted", "shell-execute", round((time.monotonic() - started) * 1000, 1),
+            pid=pid, dispatch_identity=identity.to_dict() if identity is not None else None,
+            resolved=spec.target, message=observation_error,
+        )
+    finally:
+        if info.hProcess:
+            try:
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+                kernel32.CloseHandle.restype = wintypes.BOOL
+                kernel32.CloseHandle(info.hProcess)
+            except Exception:
+                pass
+        if initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass  # Shell receipt must not be reclassified after activation.
 
 
 def dispatch(spec: LaunchSpec, resolved: str | None = None) -> DispatchReceipt:

@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from .processes import ProcessIdentity, is_same_process
 
 
-LEDGER_VERSION = 1
+LEDGER_VERSION = 2
 TERMINATION_EVIDENCE = {"exact-dispatch-identity"}
 
 
@@ -97,6 +97,8 @@ def remember_owned_processes(
             by_identity[(int(record["pid"]), int(creation_time))] = record
 
     for process in owned_processes:
+        if process.get("dispatch_backend") != "process" or process.get("ownership_evidence") not in TERMINATION_EVIDENCE:
+            continue
         creation_time = process.get("creation_time")
         if creation_time is None:
             continue
@@ -123,6 +125,8 @@ def owned_processes_for_window(hwnd: int, window_pid: int | None = None) -> list
         if record.get("validation_status") == "unknown":
             continue
         if record.get("ownership_evidence") not in TERMINATION_EVIDENCE:
+            continue
+        if record.get("dispatch_backend") != "process":
             continue
         matched.append(record)
     return matched

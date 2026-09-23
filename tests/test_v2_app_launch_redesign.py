@@ -106,6 +106,7 @@ def test_only_explicit_eligible_rejection_gets_one_fallback() -> None:
         "scripts.lcu.apps.dispatch_candidate", side_effect=[rejected, accepted]
     ) as dispatch, patch("scripts.lcu.apps._poll_for_launched_window", return_value=window), patch(
         "scripts.lcu.windows.focus_window", return_value={"hwnd": 7}
+    ), patch("scripts.lcu.apps._recheck_window", return_value=True
     ), patch("scripts.lcu.apps.snapshot_processes", return_value={}), patch(
         "scripts.lcu.apps.remember_owned_processes"
     ):
