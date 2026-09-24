@@ -298,13 +298,21 @@ def test_open_app_appsfolder_success() -> None:
         normalized="paint",
         commands=[appsfolder_cmd, "mspaint.exe"],
     )
-    mock_win = {"hwnd": 3345694, "title": "Paint", "process": "mspaint.exe", "active": True}
+    mock_win = {
+        "hwnd": 3345694, "pid": 22, "title": "Paint", "process": "mspaint.exe",
+        "image_path": r"C:\Program Files\WindowsApps\Paint\mspaint.exe",
+        "session_id": 9, "creation_time": 123,
+        "app_user_model_id": "Microsoft.Paint_8wekyb3d8bbwe!App", "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("scripts.lcu.apps.package_family_installed", return_value=True), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": False}) as mock_dispatch, \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "shell-execute", "sanitized_env_applied": False}) as mock_dispatch, \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 3345694, "title": "Paint"}) as mock_focus:
         res = open_app("paint")
         assert res["app"] == "Paint"
@@ -316,6 +324,19 @@ def test_open_app_appsfolder_success() -> None:
         mock_focus.assert_called_once_with(hwnd=3345694)
         # Only AppsFolder was dispatched, mspaint.exe was NOT executed
         mock_dispatch.assert_called_once_with(entry.candidates[0])
+
+
+def test_paint_rejects_same_title_from_other_package() -> None:
+    package = r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App"
+    entry = AppEntry("Paint", package, "config", ["paint"], "paint")
+    observed = {
+        "hwnd": 3345694, "pid": 22, "title": "Paint", "process": "mspaint.exe",
+        "image_path": r"C:\Program Files\WindowsApps\Paint\mspaint.exe",
+        "session_id": 9, "creation_time": 123,
+        "app_user_model_id": "Other.Paint_8wekyb3d8bbwe!App", "active": True,
+    }
+    with patch("os.name", "nt"), patch("scripts.lcu.processes.get_current_session_id", return_value=9):
+        assert not is_matching_window(observed, entry)
 
 
 def test_open_app_explicit_shell_rejection_exe_fallback_success() -> None:
@@ -330,7 +351,12 @@ def test_open_app_explicit_shell_rejection_exe_fallback_success() -> None:
         commands=[appsfolder_cmd, "mspaint.exe"],
     )
 
-    mock_win = {"hwnd": 556677, "title": "Paint", "process": "mspaint.exe", "active": True}
+    mock_win = {
+        "hwnd": 556677, "pid": 22, "title": "Paint", "process": "mspaint.exe",
+        "image_path": r"C:\Program Files\WindowsApps\Paint\mspaint.exe",
+        "session_id": 9, "creation_time": 124,
+        "app_user_model_id": "Microsoft.Paint_8wekyb3d8bbwe!App", "active": True,
+    }
     receipts = [
         {"status": "rejected", "accepted": False, "backend": "shell-execute", "error_code": 1155, "fallback_eligible": True},
         {"status": "accepted", "accepted": True, "backend": "process", "pid": 22},
@@ -339,8 +365,11 @@ def test_open_app_explicit_shell_rejection_exe_fallback_success() -> None:
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
          patch("scripts.lcu.apps.package_family_installed", return_value=True), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
          patch("scripts.lcu.apps.dispatch_candidate", side_effect=receipts) as mock_dispatch, \
-         patch("scripts.lcu.windows.list_windows", return_value=[]), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
          patch("scripts.lcu.apps._poll_for_launched_window", return_value=mock_win), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 556677, "title": "Paint"}) as mock_focus, \
          patch("time.sleep"):
