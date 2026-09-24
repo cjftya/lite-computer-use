@@ -425,11 +425,16 @@ def test_open_app_existing_minimized_window_reused() -> None:
         aliases=["chrome", "google chrome", "크롬"],
         normalized="chrome",
         commands=["chrome.exe"],
+        window_match={"process_names": ["chrome.exe"], "title_contains_any": ["Google Chrome"]},
     )
     existing_win = {
         "hwnd": 4852350,
+        "pid": 55,
         "title": "New Tab - Google Chrome",
         "process": "chrome.exe",
+        "image_path": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "session_id": 9,
+        "creation_time": 123,
         "active": False,
         "minimized": True,
         "bounds": {"x": -32000, "y": -32000, "width": 160, "height": 30},
@@ -437,7 +442,9 @@ def test_open_app_existing_minimized_window_reused() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.resolve_executable", return_value=existing_win["image_path"]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.dispatch_candidate") as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[existing_win]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 4852350, "title": existing_win["title"]}) as mock_focus:
         res = open_app("chrome")
@@ -447,7 +454,7 @@ def test_open_app_existing_minimized_window_reused() -> None:
         assert res["launch_method"] == "existing-window"
         assert res["target"] is None
         mock_focus.assert_called_once_with(hwnd=4852350)
-        mock_start.assert_not_called()
+        mock_dispatch.assert_not_called()
 
 
 def test_open_app_multiple_existing_windows_is_ambiguous_without_dispatch() -> None:
@@ -459,13 +466,19 @@ def test_open_app_multiple_existing_windows_is_ambiguous_without_dispatch() -> N
         aliases=["chrome", "google chrome", "크롬"],
         normalized="chrome",
         commands=["chrome.exe"],
+        window_match={"process_names": ["chrome.exe"], "title_contains_any": ["Google Chrome"]},
     )
-    win1 = {"hwnd": 101, "title": "Chrome Window 1", "process": "chrome.exe", "active": False}
-    win2 = {"hwnd": 102, "title": "Chrome Window 2", "process": "chrome.exe", "active": False}
+    image = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    win1 = {"hwnd": 101, "pid": 55, "title": "Google Chrome Window 1", "process": "chrome.exe",
+            "image_path": image, "session_id": 9, "creation_time": 123, "active": False}
+    win2 = {"hwnd": 102, "pid": 56, "title": "Google Chrome Window 2", "process": "chrome.exe",
+            "image_path": image, "session_id": 9, "creation_time": 124, "active": False}
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
+         patch("scripts.lcu.apps.resolve_executable", return_value=image), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.dispatch_candidate") as mock_dispatch, \
          patch("scripts.lcu.windows.focus_window") as mock_focus, \
          patch("scripts.lcu.windows.list_windows", return_value=[win1, win2]):
         with pytest.raises(LCUError) as exc_info:
@@ -478,11 +491,16 @@ def test_open_app_multiple_existing_windows_is_ambiguous_without_dispatch() -> N
 def test_open_app_response_fields() -> None:
     """20.8 open_app response 필수 필드: app, target, launch_method, hwnd, title, reused_existing"""
     entry = AppEntry("Notepad", "notepad.exe", "config", ["notepad"], "notepad")
-    mock_win = {"hwnd": 1234, "title": "Untitled - Notepad", "process": "notepad.exe", "active": True}
+    mock_win = {
+        "hwnd": 1234, "pid": 57, "title": "Untitled - Notepad", "process": "notepad.exe",
+        "image_path": r"C:\Windows\System32\notepad.exe", "session_id": 9,
+        "creation_time": 125, "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile"), \
+         patch("scripts.lcu.apps.resolve_executable", return_value=mock_win["image_path"]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.windows.list_windows", return_value=[mock_win]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 1234, "title": "Untitled - Notepad"}):
         res = open_app("notepad")
@@ -685,12 +703,20 @@ def test_open_app_new_window_focus_success() -> None:
         normalized="paint",
         commands=["mspaint.exe"],
     )
-    mock_win = {"hwnd": 888111, "title": "Paint", "process": "mspaint.exe", "active": True}
+    mock_win = {
+        "hwnd": 888111, "pid": 58, "title": "Paint", "process": "mspaint.exe",
+        "image_path": r"C:\Windows\System32\mspaint.exe", "session_id": 9,
+        "creation_time": 126, "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}), \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.apps.resolve_executable", return_value=mock_win["image_path"]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "process", "sanitized_env_applied": True}), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 888111, "title": "Paint"}) as mock_focus:
         res = open_app("paint")
         assert res["hwnd"] == 888111
@@ -708,12 +734,20 @@ def test_open_app_new_window_focus_failure_aborts_without_extra_candidates() -> 
         normalized="multicandidateapp",
         commands=["primary.exe", "secondary.exe"],
     )
-    mock_win = {"hwnd": 888222, "title": "App", "process": "primary.exe", "active": True}
+    mock_win = {
+        "hwnd": 888222, "pid": 59, "title": "App", "process": "primary.exe",
+        "image_path": r"C:\Apps\primary.exe", "session_id": 9,
+        "creation_time": 127, "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.apps.resolve_executable", side_effect=lambda target: rf"C:\Apps\{target}"), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "process", "sanitized_env_applied": True}) as mock_dispatch, \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", side_effect=LCUError("window_focus_failed", "Cannot focus window")):
         with pytest.raises(LCUError) as exc_info:
             open_app("multiapp")
@@ -733,11 +767,18 @@ def test_open_app_single_existing_window_reused_d3() -> None:
         normalized="chrome",
         commands=["chrome.exe"],
     )
-    existing_win = {"hwnd": 888333, "title": "Google Chrome", "process": "chrome.exe", "active": False}
+    existing_win = {
+        "hwnd": 888333, "pid": 60, "title": "Google Chrome", "process": "chrome.exe",
+        "image_path": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "session_id": 9, "creation_time": 128, "active": False,
+    }
+    entry.window_match = {"process_names": ["chrome.exe"], "title_contains_any": ["Google Chrome"]}
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
-         patch("os.startfile") as mock_start, \
+         patch("scripts.lcu.apps.resolve_executable", return_value=existing_win["image_path"]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
+         patch("scripts.lcu.apps.dispatch_candidate") as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[existing_win]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 888333, "title": "Google Chrome"}) as mock_focus:
         res = open_app("chrome")
@@ -745,7 +786,7 @@ def test_open_app_single_existing_window_reused_d3() -> None:
         assert res["reused_existing"] is True
         assert res["launch_method"] == "existing-window"
         mock_focus.assert_called_once_with(hwnd=888333)
-        mock_start.assert_not_called()
+        mock_dispatch.assert_not_called()
 
 
 def test_candidate_args_and_priority_serialization() -> None:

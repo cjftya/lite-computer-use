@@ -118,7 +118,7 @@ def test_n1_notepad_broker_launch_does_not_claim_process_ownership() -> None:
         aliases=["notepad", "메모장"],
         normalized="notepad",
         commands=[r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "notepad.exe"],
-        process_cleanup={"mode": "owned-after-close", "process_names": ["Notepad.exe"]},
+        process_cleanup={"success": "owned-after-close"},
     )
 
     notepad_ident = ProcessIdentity(
@@ -129,14 +129,22 @@ def test_n1_notepad_broker_launch_does_not_claim_process_ownership() -> None:
         creation_time=1234567,
         session_id=1,
     )
-    mock_win = {"hwnd": 7771, "title": "Untitled - Notepad", "process": "Notepad.exe", "pid": 100, "active": True}
+    mock_win = {
+        "hwnd": 7771, "pid": 100, "title": "Untitled - Notepad", "process": "Notepad.exe",
+        "image_path": notepad_ident.image_path, "session_id": 1,
+        "creation_time": notepad_ident.creation_time,
+        "app_user_model_id": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("scripts.lcu.apps.snapshot_processes", side_effect=[{}, {}, {100: notepad_ident}]), \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
+         patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
+         patch("scripts.lcu.apps.package_family_installed", return_value=True), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=1), \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "shell-execute"}), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 7771, "title": "Untitled - Notepad"}), \
-         patch("os.name", "nt"), \
-         patch("os.startfile"):
+         patch("os.name", "nt"):
         res = open_app("notepad")
         assert res["app"] == "notepad"
         assert res["hwnd"] == 7771
@@ -217,9 +225,16 @@ def test_n3_existing_notepad_preserved() -> None:
         normalized="notepad",
         commands=["notepad.exe"],
     )
-    existing_win = {"hwnd": 7772, "title": "My Notes - Notepad", "process": "notepad.exe", "pid": 200, "active": True}
+    existing_win = {
+        "hwnd": 7772, "pid": 200, "title": "My Notes - Notepad", "process": "notepad.exe",
+        "image_path": r"C:\Windows\System32\notepad.exe", "session_id": 1,
+        "creation_time": 1234568, "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+         patch("scripts.lcu.apps.resolve_executable", return_value=existing_win["image_path"]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=1), \
+         patch("scripts.lcu.apps.dispatch_candidate") as dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[existing_win]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 7772, "title": "My Notes - Notepad"}), \
          patch("os.name", "nt"):
@@ -227,6 +242,7 @@ def test_n3_existing_notepad_preserved() -> None:
         assert res["reused_existing"] is True
         assert res["hwnd"] == 7772
         assert res["owned_processes"] == []
+        dispatch.assert_not_called()
 
 
 # ============================================================================
@@ -258,17 +274,24 @@ def test_c1_c2_chrome_new_window_with_background_baseline() -> None:
         aliases=["chrome", "google chrome"],
         normalized="chrome",
         candidates=[chrome_cmd, LaunchCandidate("chrome.exe", "exe", "config")],
-        process_cleanup={"mode": "rollback-on-failure", "process_names": ["chrome.exe"]},
+        window_match={"process_names": ["chrome.exe"], "title_contains_any": ["Google Chrome"]},
     )
 
     # Window created attached to baseline Chrome PID 5555
-    mock_new_win = {"hwnd": 8881, "title": "Google Chrome", "process": "chrome.exe", "pid": 5555, "active": True}
+    mock_new_win = {
+        "hwnd": 8881, "pid": 5555, "title": "Google Chrome", "process": "chrome.exe",
+        "image_path": bg_chrome_ident.image_path, "session_id": 1,
+        "creation_time": bg_chrome_ident.creation_time, "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("scripts.lcu.apps.snapshot_processes", return_value={5555: bg_chrome_ident}), \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win]]), \
+         patch("scripts.lcu.apps.resolve_executable", return_value=bg_chrome_ident.image_path), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=1), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win], [mock_new_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 8881, "title": "Google Chrome"}), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "process", "sanitized_env_applied": True}) as mock_dispatch, \
          patch("os.name", "nt"):
         res = open_app("chrome")
         # Priority 0 candidate dispatched with --new-window
@@ -308,7 +331,6 @@ def test_c4_chrome_unconfirmed_launch_never_rolls_back() -> None:
         aliases=["chrome"],
         normalized="chrome",
         commands=["chrome.exe"],
-        process_cleanup={"mode": "rollback-on-failure", "process_names": ["chrome.exe"]},
     )
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
@@ -335,7 +357,7 @@ def test_c4_chrome_unconfirmed_launch_never_rolls_back() -> None:
 
 def test_v1_v2_vscode_new_window_with_daemon_processes() -> None:
     """V1 & V2: daemon Code.exe processes exist, no visible window -> code.exe --new-window dispatched -> baseline Code PID protected"""
-    bg_code_ident = ProcessIdentity(7001, 1, "Code.exe", None, 100, 1)
+    bg_code_ident = ProcessIdentity(7001, 1, "Code.exe", r"C:\Apps\Code.exe", 100, 1)
     code_cand = LaunchCandidate(
         target="code.exe",
         method="exe",
@@ -350,15 +372,21 @@ def test_v1_v2_vscode_new_window_with_daemon_processes() -> None:
         aliases=["vscode"],
         normalized="vscode",
         candidates=[code_cand],
-        process_cleanup={"mode": "rollback-on-failure", "process_names": ["Code.exe"]},
     )
-    mock_new_win = {"hwnd": 9991, "title": "Welcome - Visual Studio Code", "process": "Code.exe", "pid": 7001, "active": True}
+    mock_new_win = {
+        "hwnd": 9991, "pid": 7001, "title": "Welcome - Visual Studio Code", "process": "Code.exe",
+        "image_path": bg_code_ident.image_path, "session_id": 1,
+        "creation_time": bg_code_ident.creation_time, "active": True,
+    }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("scripts.lcu.apps.snapshot_processes", return_value={7001: bg_code_ident}), \
-         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win]]), \
+         patch("scripts.lcu.apps.resolve_executable", return_value=bg_code_ident.image_path), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=1), \
+         patch("scripts.lcu.apps.save_app_attempt"), \
+         patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win], [mock_new_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 9991, "title": "Welcome - Visual Studio Code"}), \
-         patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": True}) as mock_dispatch, \
+         patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "process", "sanitized_env_applied": True}) as mock_dispatch, \
          patch("os.name", "nt"):
         res = open_app("vscode")
         mock_dispatch.assert_called_once_with(code_cand)
@@ -379,7 +407,6 @@ def test_v3_vscode_unconfirmed_launch_never_rolls_back() -> None:
         aliases=["vscode"],
         normalized="vscode",
         commands=["code.exe"],
-        process_cleanup={"mode": "rollback-on-failure", "process_names": ["Code.exe"]},
     )
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \

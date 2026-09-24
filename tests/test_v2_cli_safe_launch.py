@@ -147,7 +147,7 @@ def test_shared_wait_does_not_depend_on_dispatcher_lifetime() -> None:
         aliases=["vscode"],
         normalized="vscode",
         commands=["code.exe"],
-        process_cleanup={"success": "window-only", "failure": "rollback-owned", "process_names": ["Code.exe"]},
+        process_cleanup={"success": "window-only"},
     )
     detected = {
         "hwnd": 9001,

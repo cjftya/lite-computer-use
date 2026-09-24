@@ -69,7 +69,7 @@ def test_s01_untrusted_baseline_disables_ownership() -> None:
         aliases=["vscode"],
         normalized="vscode",
         commands=["code.exe"],
-        process_cleanup={"success": "owned-after-close", "process_names": ["Code.exe"]},
+        process_cleanup={"success": "owned-after-close"},
     )
     detected = {
         "hwnd": 9001,
