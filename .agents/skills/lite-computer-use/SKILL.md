@@ -210,6 +210,10 @@ py -3.13 scripts\lcu.py batch '[{"action": "click", "x": 300, "y": 150, "capture
 
 ---
 
+Static batch validation checks the complete action schema and supported key names before any action runs. A static error dispatches zero actions. Runtime failures can leave earlier actions completed; batch does not roll them back. Read `result.results` (`index`, `action`, original `result`) alongside `completed`, and on failure retain `failedIndex`, `failedAction`, and `error`. Preserve `open_app` window and ownership metadata from batch results for cleanup. Split calls when a later action needs an `hwnd` returned by an earlier action; batch has no result substitution.
+
+`input_dispatch_failed` means Windows did not confirm a key event insertion. Successful insertion does not prove that the app accepted or saved text. `type_text` reports `chars` as the original Python character count; CRLF sends one Enter and supplementary Unicode uses UTF-16 surrogate pairs.
+
 ## 6. Ambiguity & Error Handling
 
 - 앱이나 창 검색 시 일치하는 대상이 2개 이상이면 임의 선택하지 않고 즉시 `ambiguous_target` 에러와 후보 목록을 반환합니다.

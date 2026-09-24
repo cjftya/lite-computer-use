@@ -178,9 +178,11 @@ py -3.13 scripts\lcu.py get_clipboard
 ```
 
 ### 5. Batch Execution
-Execute deterministic multi-action sequences with full upfront validation and fail-fast guarantee:
-- **Upfront validation**: The entire action schema is validated before execution. If any action is invalid, zero actions are executed (0 side effects).
-- **Fail-fast**: Stops execution immediately at the first runtime error without retry.
+Execute deterministic multi-action sequences with static validation and fail-fast execution:
+- **Upfront validation**: The entire static action schema, including supported key names, is checked before execution. A static error prevents every action from running.
+- **Runtime failure**: Stops at the first execution error without retry. Earlier actions may already have changed the desktop or clipboard; batch is not a transaction.
+- **Results**: `result.completed` counts completed actions. `result.results` contains each completed action's `index`, `action`, and original `result`, including launch ownership metadata. On failure, `failedIndex`, `failedAction`, and `error` accompany the partial results. A later action cannot reference an earlier result inside the same batch; split calls if a new `hwnd` is needed.
+- **Input**: `input_dispatch_failed` means Windows did not confirm insertion of a key event. Successful insertion does not confirm that the target app used or saved the input. `type_text` returns `chars` as the original Python character count; CRLF sends one Enter and supplementary Unicode characters use UTF-16 surrogate pairs.
 
 ```powershell
 py -3.13 scripts\lcu.py batch '[

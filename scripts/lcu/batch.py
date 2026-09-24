@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import math
 from typing import Any
 
 from . import apps, direct, windows
@@ -36,6 +37,10 @@ DISALLOWED_BATCH_ACTIONS = {
     "doctor",
     "app_status",
 }
+
+
+def _finite_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
 
 
 def _validate_single_action_schema(idx: int, item: dict[str, Any]) -> None:
@@ -74,14 +79,12 @@ def _validate_single_action_schema(idx: int, item: dict[str, Any]) -> None:
         hwnd = item.get("hwnd")
         if query is None and hwnd is None:
             raise LCUError("invalid_arguments", f"Batch action '{action}' at index {idx} requires 'query' or 'hwnd'")
-        if hwnd is not None and not isinstance(hwnd, int):
-            raise LCUError("invalid_arguments", f"Batch action '{action}' at index {idx} 'hwnd' must be an integer")
         if query is not None and (not isinstance(query, str) or not query.strip()):
             raise LCUError("invalid_arguments", f"Batch action '{action}' at index {idx} 'query' must be a non-empty string")
 
     elif action == "set_window_bounds":
         for field in ("x", "y", "width", "height"):
-            if field not in item or not isinstance(item[field], (int, float)):
+            if field not in item or not _finite_number(item[field]):
                 raise LCUError("invalid_arguments", f"Batch action 'set_window_bounds' at index {idx} requires numeric '{field}'")
         if int(item["width"]) < 50 or int(item["height"]) < 50:
             raise LCUError("invalid_arguments", f"Batch action 'set_window_bounds' at index {idx} width and height must be >= 50px")
@@ -89,17 +92,17 @@ def _validate_single_action_schema(idx: int, item: dict[str, Any]) -> None:
             raise LCUError("invalid_arguments", f"Batch action 'set_window_bounds' at index {idx} requires 'hwnd' or 'query'")
 
     elif action == "click":
-        if "x" not in item or "y" not in item or not isinstance(item["x"], (int, float)) or not isinstance(item["y"], (int, float)):
+        if "x" not in item or "y" not in item or not _finite_number(item["x"]) or not _finite_number(item["y"]):
             raise LCUError("invalid_arguments", f"Batch action 'click' at index {idx} requires numeric 'x' and 'y'")
         button = item.get("button", "left")
         if button not in ("left", "right", "middle"):
             raise LCUError("invalid_arguments", f"Batch action 'click' at index {idx} invalid button: '{button}'")
         count = item.get("count", 1)
-        if count not in (1, 2):
+        if type(count) is not int or count not in (1, 2):
             raise LCUError("invalid_arguments", f"Batch action 'click' at index {idx} invalid click count: {count} (must be 1 or 2)")
 
     elif action == "move_mouse":
-        if "x" not in item or "y" not in item or not isinstance(item["x"], (int, float)) or not isinstance(item["y"], (int, float)):
+        if "x" not in item or "y" not in item or not _finite_number(item["x"]) or not _finite_number(item["y"]):
             raise LCUError("invalid_arguments", f"Batch action 'move_mouse' at index {idx} requires numeric 'x' and 'y'")
 
     elif action == "drag":
@@ -107,47 +110,60 @@ def _validate_single_action_schema(idx: int, item: dict[str, Any]) -> None:
         sy = item.get("sy", item.get("from_y"))
         ex = item.get("ex", item.get("to_x"))
         ey = item.get("ey", item.get("to_y"))
-        if None in (sx, sy, ex, ey) or not all(isinstance(v, (int, float)) for v in (sx, sy, ex, ey)):
+        if not all(_finite_number(v) for v in (sx, sy, ex, ey)):
             raise LCUError(
                 "invalid_arguments",
                 f"Batch action 'drag' at index {idx} requires numeric coordinates (sx, sy, ex, ey)",
             )
         duration = item.get("duration", 0.2)
-        if not isinstance(duration, (int, float)) or duration < 0:
+        if not _finite_number(duration) or duration < 0:
             raise LCUError("invalid_arguments", f"Batch action 'drag' at index {idx} duration must be non-negative")
 
     elif action == "scroll":
-        if "amount" not in item or not isinstance(item["amount"], (int, float)):
+        if "amount" not in item or not _finite_number(item["amount"]):
             raise LCUError("invalid_arguments", f"Batch action 'scroll' at index {idx} requires numeric 'amount'")
 
     elif action == "type_text":
         if "text" not in item or not isinstance(item["text"], str):
             raise LCUError("invalid_arguments", f"Batch action 'type_text' at index {idx} requires string 'text'")
+        try:
+            item["text"].encode("utf-16-le")
+        except UnicodeEncodeError as exc:
+            raise LCUError("invalid_arguments", f"Batch action 'type_text' at index {idx} contains an unpaired Unicode surrogate") from exc
 
     elif action == "press_key":
         key = item.get("key")
         if not key or not isinstance(key, str) or not key.strip():
             raise LCUError("invalid_arguments", f"Batch action 'press_key' at index {idx} requires non-empty string 'key'")
+        windows.resolve_key(key)
         count = item.get("count", 1)
-        if not isinstance(count, int) or count < 1:
+        if type(count) is not int or count < 1:
             raise LCUError("invalid_arguments", f"Batch action 'press_key' at index {idx} 'count' must be integer >= 1")
 
     elif action == "hotkey":
         keys_val = item.get("keys")
-        if not keys_val:
-            raise LCUError("invalid_arguments", f"Batch action 'hotkey' at index {idx} requires non-empty 'keys'")
         if isinstance(keys_val, str):
-            if not keys_val.strip():
-                raise LCUError("invalid_arguments", f"Batch action 'hotkey' at index {idx} 'keys' cannot be empty")
+            keys = keys_val.split()
         elif isinstance(keys_val, list):
-            if len(keys_val) == 0:
-                raise LCUError("invalid_arguments", f"Batch action 'hotkey' at index {idx} 'keys' list cannot be empty")
+            keys = keys_val
         else:
             raise LCUError("invalid_arguments", f"Batch action 'hotkey' at index {idx} 'keys' must be a string or list of strings")
+        if not keys:
+            raise LCUError("invalid_arguments", f"Batch action 'hotkey' at index {idx} requires non-empty 'keys'")
+        for key in keys:
+            windows.resolve_key(key)
 
     elif action == "set_clipboard":
         if "text" not in item or not isinstance(item["text"], str):
             raise LCUError("invalid_arguments", f"Batch action 'set_clipboard' at index {idx} requires string 'text'")
+
+    if "hwnd" in item and item["hwnd"] is not None and type(item["hwnd"]) is not int:
+        raise LCUError("invalid_arguments", f"Batch action '{action}' at index {idx} 'hwnd' must be an integer")
+    if "query" in item and item["query"] is not None and (not isinstance(item["query"], str) or not item["query"].strip()):
+        raise LCUError("invalid_arguments", f"Batch action '{action}' at index {idx} 'query' must be a non-empty string")
+    for field in ("capture", "capture_id"):
+        if field in item and item[field] is not None and not isinstance(item[field], str):
+            raise LCUError("invalid_arguments", f"Batch action '{action}' at index {idx} '{field}' must be a string")
 
 
 def validate_batch_actions(actions: list[Any]) -> None:
@@ -181,7 +197,7 @@ def validate_batch_actions(actions: list[Any]) -> None:
             raise LCUError("invalid_arguments", f"Unknown or unsupported batch action: '{action_name}'")
 
         delay = item.get("delay_after", 0.0)
-        if not isinstance(delay, (int, float)):
+        if not _finite_number(delay):
             raise LCUError("invalid_arguments", f"delay_after at index {idx} must be a number")
         if delay < 0.0 or delay > 5.0:
             raise LCUError(
@@ -193,37 +209,37 @@ def validate_batch_actions(actions: list[Any]) -> None:
         _validate_single_action_schema(idx, item)
 
 
-def execute_single_action(item: dict[str, Any]) -> None:
+def execute_single_action(item: dict[str, Any]) -> Any:
     action = item["action"]
 
     if action == "open_app":
         name = item.get("name") if "name" in item else item.get("app")
-        apps.open_app(name=str(name))
+        return apps.open_app(name=str(name))
 
     elif action == "open_file":
         path = item.get("path")
-        direct.open_file(str(path))
+        return direct.open_file(str(path))
 
     elif action == "open_folder":
         folder = item.get("path") if "path" in item else item.get("folder")
-        direct.open_folder(str(folder))
+        return direct.open_folder(str(folder))
 
     elif action == "open_url":
         url = item.get("url")
-        direct.open_url(str(url))
+        return direct.open_url(str(url))
 
     elif action == "reveal_file":
         path = item.get("path")
-        direct.reveal_file(str(path))
+        return direct.reveal_file(str(path))
 
     elif action == "focus_window":
-        windows.focus_window(query=item.get("query"), hwnd=item.get("hwnd"))
+        return windows.focus_window(query=item.get("query"), hwnd=item.get("hwnd"))
 
     elif action == "close_window":
-        windows.close_window(query=item.get("query"), hwnd=item.get("hwnd"))
+        return windows.close_window(query=item.get("query"), hwnd=item.get("hwnd"))
 
     elif action == "set_window_bounds":
-        windows.set_window_bounds(
+        return windows.set_window_bounds(
             x=int(item["x"]),
             y=int(item["y"]),
             width=int(item["width"]),
@@ -236,11 +252,11 @@ def execute_single_action(item: dict[str, Any]) -> None:
         button = item.get("button", "left")
         count = int(item.get("count", 1))
         capture_id = item.get("capture") or item.get("capture_id")
-        windows.click(x=int(item["x"]), y=int(item["y"]), button=button, count=count, capture_id=capture_id)
+        return windows.click(x=int(item["x"]), y=int(item["y"]), button=button, count=count, capture_id=capture_id)
 
     elif action == "move_mouse":
         capture_id = item.get("capture") or item.get("capture_id")
-        windows.move_mouse(x=int(item["x"]), y=int(item["y"]), capture_id=capture_id)
+        return windows.move_mouse(x=int(item["x"]), y=int(item["y"]), capture_id=capture_id)
 
     elif action == "drag":
         sx = item.get("sx", item.get("from_x"))
@@ -249,7 +265,7 @@ def execute_single_action(item: dict[str, Any]) -> None:
         ey = item.get("ey", item.get("to_y"))
         capture_id = item.get("capture") or item.get("capture_id")
         duration = float(item.get("duration", 0.2))
-        windows.drag(
+        return windows.drag(
             sx=int(sx),
             sy=int(sy),
             ex=int(ex),
@@ -259,25 +275,25 @@ def execute_single_action(item: dict[str, Any]) -> None:
         )
 
     elif action == "scroll":
-        windows.scroll(amount=int(item["amount"]))
+        return windows.scroll(amount=int(item["amount"]))
 
     elif action == "type_text":
-        windows.type_text(text=str(item["text"]), hwnd=item.get("hwnd"))
+        return windows.type_text(text=str(item["text"]), hwnd=item.get("hwnd"))
 
     elif action == "press_key":
         count = int(item.get("count", 1))
-        windows.press_key(key=str(item["key"]), count=count, hwnd=item.get("hwnd"))
+        return windows.press_key(key=str(item["key"]), count=count, hwnd=item.get("hwnd"))
 
     elif action == "hotkey":
         keys_val = item.get("keys")
         if isinstance(keys_val, str):
             keys = keys_val.split()
         else:
-            keys = [str(k) for k in keys_val]
-        windows.hotkey(keys=keys, hwnd=item.get("hwnd"))
+            keys = keys_val
+        return windows.hotkey(keys=keys, hwnd=item.get("hwnd"))
 
     elif action == "set_clipboard":
-        windows.set_clipboard(text=str(item["text"]))
+        return windows.set_clipboard(text=str(item["text"]))
 
     else:
         raise LCUError("invalid_arguments", f"Unhandled action: {action}")
@@ -288,12 +304,14 @@ def execute_batch(actions: list[dict[str, Any]]) -> dict[str, Any]:
     validate_batch_actions(actions)
 
     completed = 0
+    results: list[dict[str, Any]] = []
     # 2. Sequential execution with fail-fast
     for idx, item in enumerate(actions):
         action_name = item["action"]
         try:
-            execute_single_action(item)
+            action_result = execute_single_action(item)
             completed += 1
+            results.append({"index": idx, "action": action_name, "result": action_result})
             delay = float(item.get("delay_after", 0.0))
             if delay > 0:
                 time.sleep(delay)
@@ -308,6 +326,7 @@ def execute_batch(actions: list[dict[str, Any]]) -> dict[str, Any]:
                 "action": "batch",
                 "result": {
                     "completed": completed,
+                    "results": results,
                     "failedIndex": idx,
                     "failedAction": action_name,
                 },
@@ -319,5 +338,6 @@ def execute_batch(actions: list[dict[str, Any]]) -> dict[str, Any]:
         "action": "batch",
         "result": {
             "completed": completed,
+            "results": results,
         },
     }

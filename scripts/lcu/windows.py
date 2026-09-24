@@ -96,7 +96,39 @@ KEYEVENTF_UNICODE = 0x0004
 def _send_keybd_input(vk: int = 0, scan: int = 0, flags: int = 0) -> None:
     inp = INPUT(type=INPUT_KEYBOARD)
     inp.union.ki = KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=0)
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    send_input = ctypes.windll.user32.SendInput
+    send_input.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+    send_input.restype = wintypes.UINT
+    if send_input(1, ctypes.byref(inp), ctypes.sizeof(INPUT)) != 1:
+        phase = "key release" if flags & KEYEVENTF_KEYUP else "key press"
+        raise LCUError("input_dispatch_failed", f"SendInput did not insert the requested {phase} event")
+
+
+def resolve_key(key: str) -> int:
+    """Resolve the same key names for direct input and batch pre-validation."""
+    if not isinstance(key, str) or not key.strip():
+        raise LCUError("invalid_arguments", "Key must be a non-empty string")
+    name = key.strip().upper()
+    vk = VK_MAP.get(name)
+    if vk is None and len(name) == 1:
+        vk = ord(name)
+    if vk is None:
+        raise LCUError("invalid_arguments", f"Unsupported key: '{key}'")
+    return vk
+
+
+def _stroke(vk: int = 0, scan: int = 0, flags: int = 0) -> None:
+    _send_keybd_input(vk=vk, scan=scan, flags=flags)
+    try:
+        _send_keybd_input(vk=vk, scan=scan, flags=flags | KEYEVENTF_KEYUP)
+    except BaseException:
+        # A failed release may have left a key pressed. Try once more, preserving
+        # the first error even if the cleanup also fails.
+        try:
+            _send_keybd_input(vk=vk, scan=scan, flags=flags | KEYEVENTF_KEYUP)
+        except BaseException:
+            pass
+        raise
 
 
 def get_process_name_for_pid(pid: int) -> str | None:
@@ -635,14 +667,30 @@ def drag(
 
     import pyautogui
 
-    pyautogui.FAILSAFE = False
     pyautogui.moveTo(start_x, start_y, duration=0.0)
     time.sleep(0.05)
     pyautogui.mouseDown(button="left")
-    time.sleep(0.05)
-    pyautogui.moveTo(end_x, end_y, duration=max(0.1, min(duration, 2.0)))
-    time.sleep(0.05)
-    pyautogui.mouseUp(button="left")
+    first_error: BaseException | None = None
+    try:
+        time.sleep(0.05)
+        pyautogui.moveTo(end_x, end_y, duration=max(0.1, min(duration, 2.0)))
+        time.sleep(0.05)
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        # Release even when a move hits PyAutoGUI's failsafe corner. Keep the
+        # original move error and restore the caller's failsafe setting.
+        previous_failsafe = pyautogui.FAILSAFE
+        try:
+            pyautogui.FAILSAFE = False
+            pyautogui.mouseUp(button="left")
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        finally:
+            pyautogui.FAILSAFE = previous_failsafe
+    if first_error is not None:
+        raise first_error
 
     return {
         "from": {"x": start_x, "y": start_y},
@@ -677,20 +725,23 @@ def type_text(text: str, hwnd: int | None = None) -> dict[str, int]:
     init_windows_environment()
     _verify_hwnd_foreground(hwnd)
 
-    for char in text:
+    if not isinstance(text, str):
+        raise LCUError("invalid_arguments", "Text must be a string")
+    try:
+        text.encode("utf-16-le")
+    except UnicodeEncodeError as exc:
+        raise LCUError("invalid_arguments", "Text contains an unpaired Unicode surrogate") from exc
+
+    for char in text.replace("\r\n", "\n"):
         if char in ("\r", "\n"):
-            # Send Enter
-            _send_keybd_input(vk=VK_MAP["ENTER"], flags=0)
-            _send_keybd_input(vk=VK_MAP["ENTER"], flags=KEYEVENTF_KEYUP)
+            _stroke(vk=VK_MAP["ENTER"])
         elif char == "\t":
-            # Send Tab
-            _send_keybd_input(vk=VK_MAP["TAB"], flags=0)
-            _send_keybd_input(vk=VK_MAP["TAB"], flags=KEYEVENTF_KEYUP)
+            _stroke(vk=VK_MAP["TAB"])
         else:
-            # Send Unicode char
-            code = ord(char)
-            _send_keybd_input(vk=0, scan=code, flags=KEYEVENTF_UNICODE)
-            _send_keybd_input(vk=0, scan=code, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+            encoded = char.encode("utf-16-le")
+            for offset in range(0, len(encoded), 2):
+                unit = int.from_bytes(encoded[offset:offset + 2], "little")
+                _stroke(scan=unit, flags=KEYEVENTF_UNICODE)
         time.sleep(0.005)
 
     return {"chars": len(text)}
@@ -700,20 +751,13 @@ def press_key(key: str, count: int = 1, hwnd: int | None = None) -> dict[str, An
     init_windows_environment()
     _verify_hwnd_foreground(hwnd)
 
-    k_upper = key.strip().upper()
-    vk = VK_MAP.get(k_upper)
-    if vk is None:
-        if len(k_upper) == 1:
-            vk = ord(k_upper)
-        else:
-            raise LCUError("invalid_arguments", f"Unsupported key: '{key}'")
+    vk = resolve_key(key)
 
     if count < 1:
         raise LCUError("invalid_arguments", "Key count must be at least 1")
 
     for _ in range(count):
-        _send_keybd_input(vk=vk, flags=0)
-        _send_keybd_input(vk=vk, flags=KEYEVENTF_KEYUP)
+        _stroke(vk=vk)
         time.sleep(0.01)
 
     return {"key": key, "count": count}
@@ -726,26 +770,30 @@ def hotkey(keys: list[str], hwnd: int | None = None) -> dict[str, Any]:
     if not keys:
         raise LCUError("invalid_arguments", "Hotkey requires at least one key")
 
-    vks: list[int] = []
-    for k in keys:
-        k_upper = k.strip().upper()
-        vk = VK_MAP.get(k_upper)
-        if vk is None:
-            if len(k_upper) == 1:
-                vk = ord(k_upper)
-            else:
-                raise LCUError("invalid_arguments", f"Unsupported key in hotkey: '{k}'")
-        vks.append(vk)
-
-    # Press keys in order
-    for vk in vks:
-        _send_keybd_input(vk=vk, flags=0)
-        time.sleep(0.005)
-
-    # Release in reverse order
-    for vk in reversed(vks):
-        _send_keybd_input(vk=vk, flags=KEYEVENTF_KEYUP)
-        time.sleep(0.005)
+    vks = [resolve_key(key) for key in keys]
+    pressed: list[int] = []
+    first_error: BaseException | None = None
+    try:
+        for vk in vks:
+            _send_keybd_input(vk=vk)
+            pressed.append(vk)
+            time.sleep(0.005)
+    except BaseException as exc:
+        first_error = exc
+    finally:
+        for vk in reversed(pressed):
+            try:
+                _send_keybd_input(vk=vk, flags=KEYEVENTF_KEYUP)
+                time.sleep(0.005)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                try:
+                    _send_keybd_input(vk=vk, flags=KEYEVENTF_KEYUP)
+                except BaseException:
+                    pass
+    if first_error is not None:
+        raise first_error
 
     return {"keys": keys}
 
