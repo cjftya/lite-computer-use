@@ -60,6 +60,8 @@ py -3.13 scripts\lcu.py <tool> [args]
 
 Use input tools only after `ready`. For `window_focus_failed`, retry focus only on the returned HWND. For `window_unconfirmed` or `dispatch_outcome_unknown`, use `app_status` or one necessary screen check and do not call `open_app` again. For `ambiguous_target` or `window_observation_failed`, report/select/fix observation without a raw shell fallback.
 
+Before launching any GUI app, run `launch_context` in the execution host that will invoke `open_app`. Require `input_desktop.attached=true`. If it is false, use an authorized host attached to the input desktop, verify `launch_context` there, and invoke `open_app` once from that host. `desktop_unavailable` is a pre-dispatch error (`dispatch_accepted=false`); no app was launched by that call. Do not treat an invisible process as a successful window, and do not use another launcher as a fallback.
+
 ---
 
 ## 2. Orchestration & Planning Protocol (Phase 2)

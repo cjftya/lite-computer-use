@@ -186,6 +186,42 @@ def _desktop_context() -> tuple[dict[str, Any], dict[str, Any]]:
         return dict(error), dict(error)
 
 
+def get_input_desktop_status() -> dict[str, Any]:
+    """Compare this thread's desktop with the desktop receiving user input."""
+    if os.name != "nt":
+        return {"status": "unsupported", "current": None, "input": None, "attached": None}
+    _, current = _desktop_context()
+    input_desktop: dict[str, Any] = {"status": "error", "value": None}
+    handle = None
+    try:
+        user32, _ = _configure_desktop_apis()
+        _set_signature(
+            user32.OpenInputDesktop,
+            [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD],
+            wintypes.HANDLE,
+        )
+        _set_signature(user32.CloseDesktop, [wintypes.HANDLE], wintypes.BOOL)
+        handle = user32.OpenInputDesktop(0, False, 0x0001)  # DESKTOP_READOBJECTS
+        input_desktop = _user_object_name(handle)
+    except Exception:
+        input_desktop = {"status": "error", "value": None, "error_code": _last_error_code()}
+    finally:
+        if handle:
+            try:
+                user32.CloseDesktop(handle)
+            except Exception:
+                pass
+    attached = None
+    if current.get("status") == "ok" and input_desktop.get("status") == "ok":
+        attached = current["value"].casefold() == input_desktop["value"].casefold()
+    return {
+        "status": "ok" if attached is not None else "error",
+        "current": current,
+        "input": input_desktop,
+        "attached": attached,
+    }
+
+
 def _selected_environment(source: Mapping[str, str]) -> dict[str, dict[str, Any]]:
     selected: dict[str, dict[str, Any]] = {}
     digest_key = _diagnostic_key()
@@ -228,6 +264,7 @@ def get_launch_context_snapshot(source: Mapping[str, str] | None = None) -> dict
             pass
 
     window_station, desktop = _desktop_context()
+    input_desktop = get_input_desktop_status()
     return {
         "python_exe": sys.executable,
         "pid": os.getpid(),
@@ -236,6 +273,7 @@ def get_launch_context_snapshot(source: Mapping[str, str] | None = None) -> dict
         "session_id": session_id,
         "window_station": window_station,
         "desktop": desktop,
+        "input_desktop": input_desktop,
         "cwd": str(Path.cwd()),
         "shell": "SHELL" if _case_insensitive_get(env, "SHELL") else (
             "COMSPEC" if _case_insensitive_get(env, "COMSPEC") else None
