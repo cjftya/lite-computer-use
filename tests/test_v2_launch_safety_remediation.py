@@ -91,6 +91,8 @@ def test_s01_untrusted_baseline_disables_ownership() -> None:
     ), patch(
         "scripts.lcu.apps.dispatch_candidate",
         return_value={
+            "status": "accepted",
+            "backend": "process",
             "sanitized_env_applied": True,
             "dispatch_identity": identity.to_dict(),
         },

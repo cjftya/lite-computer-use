@@ -61,6 +61,18 @@ def test_browser_pwa_does_not_become_ready_from_process_and_title():
                                           'New Tab - Google Chrome'), browser) == 'insufficient_evidence'
 
 
+def test_configured_chrome_accepts_browser_but_rejects_pwa_identity():
+    browser = AppEntry(
+        'chrome', 'chrome.exe', 'config', ['Google Chrome'], 'chrome',
+        window_match={'process_names': ['chrome.exe'], 'title_contains_any': ['Google Chrome']},
+    )
+    normal = window(r'C:\Chrome\chrome.exe', 'chrome.exe', 'New Tab - Google Chrome')
+    pwa = {**normal, 'app_user_model_id': 'Chrome._crx_example'}
+    with patch('scripts.lcu.apps.resolve_executable', return_value=r'C:\Chrome\chrome.exe'):
+        assert window_match_status(normal, browser) == 'match'
+        assert window_match_status(pwa, browser) == 'no_match'
+
+
 @pytest.mark.parametrize('status,expected', [('accepted', True), ('rejected', False),
                                              ('unknown', None), (None, None), ('bogus', None)])
 def test_app_status_preserves_dispatch_tristate(status, expected):
@@ -267,3 +279,40 @@ def test_direct_process_identity_lookup_failure_keeps_accepted():
     assert receipt.status == 'accepted'
     assert receipt.pid == 202
     assert receipt.dispatch_identity is None
+
+
+def test_stale_candidate_is_checked_once_per_index_and_never_dispatched():
+    from scripts.lcu.apps import open_app
+    from scripts.lcu.errors import LCUError
+
+    target = entry()
+    with patch('scripts.lcu.apps.build_app_index', return_value=[target]) as index, \
+         patch('scripts.lcu.apps._candidate_target_is_stale', return_value=True) as stale, \
+         patch('scripts.lcu.apps.dispatch_candidate') as dispatch:
+        with pytest.raises(LCUError) as raised:
+            open_app('vscode')
+
+    assert raised.value.code == 'target_not_found'
+    assert index.call_count == 2  # Cached index, then one refresh.
+    assert stale.call_count == 2  # Once per candidate in each index.
+    dispatch.assert_not_called()
+
+
+def test_legacy_receipt_without_status_is_unknown_and_never_retried():
+    from scripts.lcu.apps import open_app
+    from scripts.lcu.errors import LCUError
+
+    with patch('scripts.lcu.apps.build_app_index', return_value=[entry()]), \
+         patch('scripts.lcu.apps.find_matching_windows', return_value=[]), \
+         patch('scripts.lcu.windows.list_windows', return_value=[]), \
+         patch('scripts.lcu.apps.snapshot_processes', return_value={}), \
+         patch('scripts.lcu.apps.dispatch_candidate', return_value={'sanitized_env_applied': True}) as dispatch, \
+         patch('scripts.lcu.apps._poll_for_launched_window', return_value=None), \
+         patch('scripts.lcu.apps.save_app_attempt') as save:
+        with pytest.raises(LCUError) as raised:
+            open_app('vscode')
+
+    assert raised.value.code == 'dispatch_outcome_unknown'
+    assert raised.value.details['dispatch_accepted'] is None
+    assert save.call_args.args[1]['dispatch']['status'] == 'unknown'
+    dispatch.assert_called_once()

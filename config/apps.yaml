@@ -8,9 +8,6 @@ apps:
       - chrome.exe
     process_cleanup:
       success: window-only
-      failure: rollback-owned
-      process_names:
-        - chrome.exe
     window_match:
       process_names:
         - chrome.exe
@@ -32,9 +29,6 @@ apps:
       - notepad.exe
     process_cleanup:
       success: owned-after-close
-      failure: rollback-owned
-      process_names:
-        - Notepad.exe
 
   calculator:
     aliases: [calculator, calc, 계산기]
@@ -79,9 +73,6 @@ apps:
       - code.cmd
     process_cleanup:
       success: window-only
-      failure: rollback-owned
-      process_names:
-        - Code.exe
 
   paint:
     aliases: [paint, microsoft paint, 그림판]

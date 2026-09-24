@@ -18,6 +18,16 @@ from lcu import apps, batch, capture, direct, launch_context, windows
 from lcu.errors import LCUError, format_error, format_success, output_json
 
 
+def require_input_desktop() -> None:
+    attachment = launch_context.get_input_desktop_status()
+    if attachment["attached"] is not True:
+        raise LCUError(
+            "desktop_unavailable",
+            "This CLI is not attached to the Windows input desktop; run open_app from an interactive desktop host",
+            details={**attachment, "dispatch_accepted": False, "retry_launch_allowed": False},
+        )
+
+
 def run_doctor() -> dict[str, Any]:
     checks: dict[str, Any] = {}
     ok = True
@@ -239,13 +249,7 @@ def main() -> None:
             print(output_json(format_success("launch_context", res)))
 
         elif action == "open_app":
-            attachment = launch_context.get_input_desktop_status()
-            if attachment["attached"] is not True:
-                raise LCUError(
-                    "desktop_unavailable",
-                    "This CLI is not attached to the Windows input desktop; run open_app from an interactive desktop host",
-                    details={**attachment, "dispatch_accepted": False, "retry_launch_allowed": False},
-                )
+            require_input_desktop()
             res = apps.open_app(args.name, debug=args.debug)
             print(output_json(format_success("open_app", res)))
 
@@ -404,13 +408,7 @@ def main() -> None:
                 raise LCUError("invalid_arguments", "Batch payload must be a JSON array or an object with 'actions'")
 
             if any(isinstance(item, dict) and item.get("action") == "open_app" for item in actions_list):
-                attachment = launch_context.get_input_desktop_status()
-                if attachment["attached"] is not True:
-                    raise LCUError(
-                        "desktop_unavailable",
-                        "This CLI is not attached to the Windows input desktop; run the batch from an interactive desktop host",
-                        details={**attachment, "dispatch_accepted": False, "retry_launch_allowed": False},
-                    )
+                require_input_desktop()
             res = batch.execute_batch(actions_list)
             print(output_json(res))
             if not res["ok"]:

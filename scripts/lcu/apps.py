@@ -304,9 +304,7 @@ def dispatch_candidate(candidate: LaunchCandidate) -> dict[str, Any]:
     resolved = candidate.target if kind in {"packaged", "shortcut", "uri"} else resolve_executable(candidate.target)
     spec = _candidate_to_launch_spec(candidate)
     receipt = dispatch_launch_spec(spec, resolved=resolved)
-    result = receipt.to_dict()
-    result["launch_type"] = receipt.backend
-    return result
+    return receipt.to_dict()
 
 
 def _can_merge_discovered_entry(existing: AppEntry, discovered: AppEntry) -> bool:
@@ -640,23 +638,9 @@ def build_app_index(config_path: Path | None = None, force_refresh: bool = False
     for app in config_apps:
         indexed_entries.append(app)
 
-    # 2. Start menu apps: alias-aware merge with existing entries
-    for app in start_menu_apps:
-        app_keys = entry_match_keys(app)
-        matched_idx = None
-        for i, existing in enumerate(indexed_entries):
-            if entry_match_keys(existing) & app_keys and _can_merge_discovered_entry(existing, app):
-                matched_idx = i
-                break
-        if matched_idx is not None:
-            indexed_entries[matched_idx] = merge_app_entries(
-                primary=indexed_entries[matched_idx], secondary=app
-            )
-        else:
-            indexed_entries.append(app)
-
-    # 3. App paths apps: alias-aware merge with existing entries
-    for app in app_paths_apps:
+    # Merge each discovery source into config only; never collapse two
+    # independently discovered installations with the same display name.
+    for app in (*start_menu_apps, *app_paths_apps):
         app_keys = entry_match_keys(app)
         matched_idx = None
         for i, existing in enumerate(indexed_entries):
@@ -734,11 +718,7 @@ def find_app_entry(query: str, index: list[AppEntry]) -> tuple[AppEntry | None, 
 
 
 def _success_cleanup_policy(entry: AppEntry) -> str:
-    cleanup = entry.process_cleanup
-    if "success" in cleanup:
-        return str(cleanup.get("success", "window-only"))
-    legacy_mode = str(cleanup.get("mode", "none"))
-    return "owned-after-close" if legacy_mode == "owned-after-close" else "window-only"
+    return str(entry.process_cleanup.get("success", "window-only"))
 
 
 def _poll_for_launched_window(
@@ -814,20 +794,6 @@ def _dispatch_accepted(status: Any) -> bool | None:
     return True if status == "accepted" else False if status == "rejected" else None
 
 
-def _coerce_receipt(info: dict[str, Any], elapsed_ms: float) -> dict[str, Any]:
-    if "status" in info:
-        return info
-    # Compatibility for custom dispatch adapters written against the v2 dict.
-    return {
-        **info,
-        "status": "accepted",
-        "accepted": True,
-        "backend": info.get("launch_type", "legacy-adapter"),
-        "elapsed_ms": elapsed_ms,
-        "fallback_eligible": False,
-    }
-
-
 def _entry_for_attempt(entry: AppEntry) -> dict[str, Any]:
     data = entry.to_dict()
     data["commands"] = []
@@ -882,19 +848,21 @@ def open_app(
             details=_error_details(attempt_id=attempt_id, stage="resolve", dispatch_accepted=False),
         )
 
-    if any(_candidate_target_is_stale(candidate) for candidate in entry.candidates):
+    stale_by_id = {id(candidate): _candidate_target_is_stale(candidate) for candidate in entry.candidates}
+    if any(stale_by_id.values()):
         refreshed = build_app_index(config_path, force_refresh=True)
         refreshed_entry, refreshed_candidates = find_app_entry(name.strip(), refreshed)
         if refreshed_entry is not None and not refreshed_candidates:
             entry = refreshed_entry
+            stale_by_id = {id(candidate): _candidate_target_is_stale(candidate) for candidate in entry.candidates}
 
-    if entry.candidates and all(_candidate_target_is_stale(c) for c in entry.candidates):
+    if entry.candidates and all(stale_by_id.values()):
         raise LCUError(
             "target_not_found", f"All resolved launch targets for '{name}' are stale",
             details=_error_details(attempt_id=attempt_id, stage="resolve", dispatch_accepted=False),
         )
 
-    # Phase 6: Pre-check for existing window
+    # Reuse only a verified existing window.
     from .windows import focus_window, list_windows
     try:
         existing_windows = find_matching_windows(entry)
@@ -968,7 +936,6 @@ def open_app(
         baseline_pids = set(baseline_processes.keys())
         baseline_trusted = snapshot_is_complete(baseline_processes)
     except Exception:
-        baseline_processes = {}
         baseline_pids = set()
         baseline_trusted = False
 
@@ -998,7 +965,7 @@ def open_app(
     receipt: dict[str, Any] | None = None
     fallback_used = False
     for candidate in entry.candidates:
-        if _candidate_target_is_stale(candidate):
+        if stale_by_id[id(candidate)]:
             attempts.append({
                 "method": candidate.method,
                 "target": candidate.target,
@@ -1014,19 +981,21 @@ def open_app(
         try:
             dispatch_started_at = time.monotonic()
             dispatch_info = dispatch_candidate(candidate)
+            if dispatch_info.get("status") not in {"accepted", "rejected", "unknown"}:
+                raise ValueError("Dispatch adapter returned no valid status")
             elapsed_ms = (time.monotonic() - dispatch_started_at) * 1000
             dispatch_ms += elapsed_ms
-            receipt = _coerce_receipt(dispatch_info, elapsed_ms)
+            receipt = dispatch_info
             sanitized_env_applied = sanitized_env_applied or bool(
                 receipt.get("sanitized_env_applied")
             )
         except Exception as exc:
             code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
             receipt = {
-                "status": "rejected", "accepted": False, "backend": "adapter",
+                "status": "unknown", "accepted": None, "backend": "adapter",
                 "elapsed_ms": round((time.monotonic() - dispatch_started_at) * 1000, 1),
                 "error_code": code, "error_type": type(exc).__name__, "message": str(exc),
-                "fallback_eligible": code in {2, 3},
+                "fallback_eligible": False,
             }
         attempts.append({
             "method": candidate.method, "target": candidate.target,
@@ -1126,10 +1095,9 @@ def open_app(
 
             win_proc = detected_win.get("process", "")
 
-            # Process Ownership calculation:
             owned_processes: list[dict[str, Any]] = []
 
-            # Only track owned processes if NOT reusing an existing window and window PID is not a baseline process
+            # Only record direct-dispatch ownership with complete live identity.
             raw_dispatch_identity = receipt.get("dispatch_identity")
             try:
                 dispatch_identity = ProcessIdentity.from_dict(raw_dispatch_identity) if isinstance(raw_dispatch_identity, dict) else None
