@@ -62,4 +62,7 @@ def format_error(action: str, exc: Exception | LCUError) -> dict[str, Any]:
 
 
 def output_json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    # The Windows CLI can inherit a legacy code page even when window titles
+    # contain characters outside it. ASCII escapes keep the JSON writable and
+    # preserve the original Unicode value for JSON consumers.
+    return json.dumps(payload, ensure_ascii=True, indent=2)

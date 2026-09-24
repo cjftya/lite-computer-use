@@ -25,7 +25,7 @@ from .processes import (
     snapshot_processes,
 )
 from .state import load_app_attempt, save_app_attempt
-from .win_launch import dispatch as dispatch_launch_spec
+from .win_launch import dispatch as dispatch_launch_spec, package_family_installed
 
 CACHE_MAX_AGE_SECONDS = 86_400  # 24 hours
 APP_INDEX_CACHE_VERSION = 7
@@ -374,10 +374,14 @@ def window_match_status(win: dict[str, Any], entry: AppEntry) -> str:
     if packaged_runtime and expected_paths and not package_verified and proc in process_names:
         return "insufficient_evidence"
 
-    # A browser's process and tab title do not prove it is a normal window
-    # rather than an installed web app running under the same executable.
+    # A browser needs an explicit title rule as well as the process, image and
+    # session checks above. A Chrome installed app has a distinct app ID when
+    # Windows exposes one; reject it even if its title imitates the browser.
     if entry.normalized in {"chrome", "edge", "firefox"}:
-        return "insufficient_evidence"
+        if not (configured_match.get("process_names") and configured_match.get("title_contains_any")):
+            return "insufficient_evidence"
+        if entry.normalized == "chrome" and "_crx_" in observed_id:
+            return "no_match"
     if configured_match:
         contains = [str(v).lower() for v in configured_match.get("title_contains_any", [])]
         equals = [str(v).lower() for v in configured_match.get("title_equals_any", [])]
@@ -836,7 +840,9 @@ def _entry_for_attempt(entry: AppEntry) -> dict[str, Any]:
 
 
 def _candidate_target_is_stale(candidate: LaunchCandidate) -> bool:
-    if candidate.method in {"uri", "appsfolder"}:
+    if candidate.method == "appsfolder":
+        return package_family_installed(candidate.target) is False
+    if candidate.method == "uri":
         return False
     target = candidate.target.strip().strip('"')
     path = Path(target)

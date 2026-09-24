@@ -75,6 +75,35 @@ def test_stale_absolute_target_refreshes_once_without_dispatch(tmp_path: Path) -
     dispatch.assert_not_called()
 
 
+def test_missing_appsfolder_package_uses_exe_without_shell_dispatch() -> None:
+    entry = AppEntry(
+        "notepad", "shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+        "config", ["notepad"], "notepad",
+        commands=["shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "notepad.exe"],
+    )
+    window = {"hwnd": 1234, "pid": 42, "title": "Untitled - Notepad", "process": "Notepad.exe"}
+    with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), patch(
+        "scripts.lcu.apps.package_family_installed", return_value=False
+    ), patch("scripts.lcu.apps.find_matching_windows", return_value=[]), patch(
+        "scripts.lcu.windows.list_windows", return_value=[]
+    ), patch("scripts.lcu.apps.snapshot_processes", return_value={}), patch(
+        "scripts.lcu.apps.dispatch_candidate",
+        return_value={"status": "accepted", "backend": "process", "pid": 42},
+    ) as dispatch, patch(
+        "scripts.lcu.apps._poll_for_launched_window", return_value=window
+    ), patch("scripts.lcu.apps._recheck_window", return_value=True), patch(
+        "scripts.lcu.windows.focus_window", return_value={"hwnd": 1234}
+    ), patch(
+        "scripts.lcu.apps.remember_owned_processes"
+    ):
+        result = open_app("notepad")
+
+    assert result["target"] == "notepad.exe"
+    assert result["window_verified"] is True
+    assert result["foreground"] is True
+    dispatch.assert_called_once_with(entry.candidates[1])
+
+
 def test_accepted_dispatch_never_launches_second_candidate() -> None:
     entry = _entry()
     receipt = {"status": "accepted", "accepted": True, "backend": "process", "pid": 42}

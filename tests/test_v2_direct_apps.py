@@ -17,6 +17,7 @@ from scripts.lcu.apps import (
     candidate_priority_key,
     classify_launch_method,
     find_app_entry,
+    is_matching_window,
     load_config_apps,
     normalize_app_name,
     open_app,
@@ -30,7 +31,68 @@ from scripts.lcu.direct import (
     resolve_folder_path,
     reveal_file,
 )
-from scripts.lcu.errors import LCUError
+from scripts.lcu.errors import LCUError, output_json
+
+
+def test_cli_json_preserves_unicode_on_legacy_windows_code_pages() -> None:
+    encoded = output_json({"title": "\u2819 \uba54\ubaa8\uc7a5"})
+    encoded.encode("cp949")
+    assert json.loads(encoded)["title"] == "\u2819 \uba54\ubaa8\uc7a5"
+
+
+def test_notepad_rejects_foreign_title_and_reuses_real_window() -> None:
+    entry = AppEntry("notepad", "notepad.exe", "config", ["notepad"], "notepad")
+    wrong = {"hwnd": 101, "pid": 1, "title": "Untitled - Notepad", "process": "chrome.exe",
+             "image_path": r"C:\Chrome\chrome.exe", "session_id": 1, "creation_time": 10}
+    right = {"hwnd": 102, "pid": 2, "title": "Untitled - Notepad", "process": "Notepad.exe",
+             "image_path": r"C:\Windows\System32\notepad.exe", "session_id": 1, "creation_time": 11}
+    with patch("scripts.lcu.apps.resolve_executable", return_value=right["image_path"]), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=1):
+        assert not is_matching_window(wrong, entry)
+        assert is_matching_window(right, entry)
+        with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+             patch("scripts.lcu.windows.list_windows", return_value=[wrong, right]), \
+             patch("scripts.lcu.apps._recheck_window", return_value=True), \
+             patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 102}) as focus, \
+             patch("scripts.lcu.apps.dispatch_candidate") as dispatch:
+            result = open_app("notepad")
+
+    assert result["hwnd"] == 102
+    assert result["reused_existing"] is True
+    assert result["window_verified"] is True
+    assert result["foreground"] is True
+    focus.assert_called_once_with(hwnd=102)
+    dispatch.assert_not_called()
+
+
+def test_chrome_rejects_pwa_and_reuses_real_browser() -> None:
+    entry = AppEntry(
+        "chrome", "chrome.exe", "config", ["chrome", "google chrome"], "chrome",
+        window_match={"process_names": ["chrome.exe"], "title_contains_any": ["Google Chrome"]},
+    )
+    image = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    pwa = {"hwnd": 201, "pid": 3, "title": "ChatGPT - Google Chrome", "process": "chrome.exe",
+           "image_path": image, "session_id": 1, "creation_time": 12,
+           "app_user_model_id": "Chrome._crx_example"}
+    browser = {"hwnd": 202, "pid": 3, "title": "New Tab - Google Chrome", "process": "chrome.exe",
+               "image_path": image, "session_id": 1, "creation_time": 12}
+    with patch("scripts.lcu.apps.resolve_executable", return_value=image), \
+         patch("scripts.lcu.processes.get_current_session_id", return_value=1):
+        assert not is_matching_window(pwa, entry)
+        assert is_matching_window(browser, entry)
+        with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
+             patch("scripts.lcu.windows.list_windows", return_value=[pwa, browser]), \
+             patch("scripts.lcu.apps._recheck_window", return_value=True), \
+             patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 202}) as focus, \
+             patch("scripts.lcu.apps.dispatch_candidate") as dispatch:
+            result = open_app("chrome")
+
+    assert result["hwnd"] == 202
+    assert result["reused_existing"] is True
+    assert result["window_verified"] is True
+    assert result["foreground"] is True
+    focus.assert_called_once_with(hwnd=202)
+    dispatch.assert_not_called()
 
 
 def test_open_file_validation(tmp_path: Path) -> None:
@@ -240,6 +302,7 @@ def test_open_app_appsfolder_success() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
+         patch("scripts.lcu.apps.package_family_installed", return_value=True), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={"sanitized_env_applied": False}) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 3345694, "title": "Paint"}) as mock_focus:
@@ -275,6 +338,7 @@ def test_open_app_explicit_shell_rejection_exe_fallback_success() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
+         patch("scripts.lcu.apps.package_family_installed", return_value=True), \
          patch("scripts.lcu.apps.dispatch_candidate", side_effect=receipts) as mock_dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[]), \
          patch("scripts.lcu.apps._poll_for_launched_window", return_value=mock_win), \
@@ -304,6 +368,7 @@ def test_open_app_two_explicit_dispatch_rejections() -> None:
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
          patch("os.name", "nt"), \
+         patch("scripts.lcu.apps.package_family_installed", return_value=True), \
          patch("scripts.lcu.apps.dispatch_candidate", side_effect=[
              {"status": "rejected", "accepted": False, "backend": "shell-execute", "error_code": 1155, "fallback_eligible": True},
              {"status": "rejected", "accepted": False, "backend": "process", "error_code": 2, "fallback_eligible": True},

@@ -14,6 +14,34 @@ from .launch_context import build_gui_launch_env, get_gui_env_normalization
 from .processes import get_process_identity
 
 
+def package_family_installed(target: str) -> bool | None:
+    """Check an AppsFolder package family before ShellExecute can show a modal error."""
+    if os.name != "nt":
+        return None
+    prefix = "shell:appsfolder\\"
+    if not target.casefold().startswith(prefix) or "!" not in target[len(prefix):]:
+        return None
+    family = target[len(prefix):].split("!", 1)[0]
+    if not family:
+        return None
+    try:
+        function = ctypes.WinDLL("kernel32", use_last_error=True).GetPackagesByPackageFamily
+        function.argtypes = [
+            wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD),
+            wintypes.LPWSTR,
+        ]
+        function.restype = wintypes.LONG
+        count = wintypes.DWORD()
+        buffer_length = wintypes.DWORD()
+        status = function(family, ctypes.byref(count), None, ctypes.byref(buffer_length), None)
+    except (AttributeError, OSError):
+        return None
+    if status in (0, 122):
+        return count.value > 0
+    return None
+
+
 @dataclass
 class DispatchReceipt:
     status: str  # accepted | rejected | unknown

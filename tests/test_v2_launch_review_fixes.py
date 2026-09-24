@@ -56,8 +56,9 @@ def test_shortcut_target_and_package_identity():
 
 def test_browser_pwa_does_not_become_ready_from_process_and_title():
     browser = AppEntry('chrome', 'chrome.exe', 'config', ['Google Chrome'], 'chrome')
-    assert window_match_status(window(r'C:\Chrome\chrome.exe', 'chrome.exe',
-                                      'New Tab - Google Chrome'), browser) == 'insufficient_evidence'
+    with patch('scripts.lcu.apps.resolve_executable', return_value=r'C:\Chrome\chrome.exe'):
+        assert window_match_status(window(r'C:\Chrome\chrome.exe', 'chrome.exe',
+                                          'New Tab - Google Chrome'), browser) == 'insufficient_evidence'
 
 
 @pytest.mark.parametrize('status,expected', [('accepted', True), ('rejected', False),
