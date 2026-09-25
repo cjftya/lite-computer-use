@@ -82,7 +82,8 @@ def test_configured_chrome_accepts_browser_but_rejects_pwa_identity():
 def test_default_browser_rules_check_identity_and_title(name, exe, title):
     browser = next(item for item in load_config_apps() if item.name == name)
     normal = window('C:/Browsers/' + exe, exe, title)
-    with patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe):
+    with simulated_windows_os('scripts.lcu.apps'), \
+         patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe):
         assert window_match_status(normal, browser) == 'match'
         assert window_match_status({**normal, 'image_path': 'C:/Other/' + exe}, browser) == 'no_match'
         assert window_match_status({**normal, 'process': 'other.exe'}, browser) == 'no_match'
@@ -102,7 +103,8 @@ def test_default_browser_existing_window_is_reused_without_dispatch(name, exe, t
     from scripts.lcu.apps import open_app
     browser = next(item for item in load_config_apps() if item.name == name)
     existing = window('C:/Browsers/' + exe, exe, title)
-    with patch('scripts.lcu.apps.build_app_index', return_value=[browser]), \
+    with simulated_windows_os('scripts.lcu.apps'), \
+         patch('scripts.lcu.apps.build_app_index', return_value=[browser]), \
          patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe), \
          patch('scripts.lcu.apps._candidate_target_is_stale', return_value=False), \
          patch('scripts.lcu.windows.list_windows', return_value=[existing]), \
@@ -121,7 +123,8 @@ def test_default_browser_new_window_observation_uses_same_rules(name, exe, title
     from scripts.lcu.apps import _poll_for_launched_window
     browser = next(item for item in load_config_apps() if item.name == name)
     observed = window('C:/Browsers/' + exe, exe, title)
-    with patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe), \
+    with simulated_windows_os('scripts.lcu.apps'), \
+         patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe), \
          patch('scripts.lcu.windows.list_windows', return_value=[observed]):
         assert _poll_for_launched_window(browser, set(), 0) == observed
 
