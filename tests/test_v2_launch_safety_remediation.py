@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 import json
 from unittest.mock import MagicMock, patch
 
@@ -42,7 +44,7 @@ def test_d01_diagnostics_never_emit_prefix_secret_values() -> None:
 
 
 def test_d02_desktop_api_failure_is_reported_as_error() -> None:
-    with patch("scripts.lcu.launch_context.os.name", "nt"), patch(
+    with simulated_windows_os('scripts.lcu.launch_context'), patch(
         "scripts.lcu.launch_context._configure_desktop_apis",
         side_effect=OSError("desktop unavailable"),
     ):
@@ -103,7 +105,7 @@ def test_s01_untrusted_baseline_disables_ownership() -> None:
         "scripts.lcu.windows.focus_window", return_value={"hwnd": 9001}
     ), patch("scripts.lcu.apps.save_app_attempt"), patch("scripts.lcu.apps.remember_owned_processes"), patch(
         "scripts.lcu.apps.get_launch_context_snapshot", return_value={}
-    ), patch("os.name", "nt"):
+    ), simulated_windows_os():
         result = open_app("vscode", debug=True)
 
     assert result["owned_processes"] == []
@@ -134,7 +136,7 @@ def test_s04_atomic_termination_handle_rechecks_identity() -> None:
     reused = _identity(creation_time=2000)
     fake_windll = MagicMock(kernel32=kernel32)
 
-    with patch("scripts.lcu.processes.os.name", "nt"), patch.object(
+    with simulated_windows_os('scripts.lcu.processes'), patch.object(
         __import__("scripts.lcu.processes", fromlist=["ctypes"]).ctypes,
         "windll",
         fake_windll,
@@ -153,7 +155,7 @@ def test_s05_open_process_failure_is_not_reported_as_success() -> None:
     kernel32.OpenProcess.return_value = 0
     fake_windll = MagicMock(kernel32=kernel32)
 
-    with patch("scripts.lcu.processes.os.name", "nt"), patch.object(
+    with simulated_windows_os('scripts.lcu.processes'), patch.object(
         __import__("scripts.lcu.processes", fromlist=["ctypes"]).ctypes,
         "windll",
         fake_windll,

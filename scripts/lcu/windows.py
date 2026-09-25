@@ -105,15 +105,16 @@ def _send_keybd_input(vk: int = 0, scan: int = 0, flags: int = 0) -> None:
 
 
 def resolve_key(key: str) -> int:
-    """Resolve the same key names for direct input and batch pre-validation."""
+    """Resolve named virtual keys or ASCII letters/digits for direct and batch input."""
     if not isinstance(key, str) or not key.strip():
         raise LCUError("invalid_arguments", "Key must be a non-empty string")
-    name = key.strip().upper()
+    raw = key.strip()
+    name = raw.upper()
     vk = VK_MAP.get(name)
-    if vk is None and len(name) == 1:
+    if vk is None and len(raw) == 1 and ("A" <= raw <= "Z" or "a" <= raw <= "z" or "0" <= raw <= "9"):
         vk = ord(name)
     if vk is None:
-        raise LCUError("invalid_arguments", f"Unsupported key: '{key}'")
+        raise LCUError("invalid_arguments", f"Unsupported virtual key: '{key}'. Use type_text for ordinary characters")
     return vk
 
 
@@ -669,9 +670,9 @@ def drag(
 
     pyautogui.moveTo(start_x, start_y, duration=0.0)
     time.sleep(0.05)
-    pyautogui.mouseDown(button="left")
     first_error: BaseException | None = None
     try:
+        pyautogui.mouseDown(button="left")
         time.sleep(0.05)
         pyautogui.moveTo(end_x, end_y, duration=max(0.1, min(duration, 2.0)))
         time.sleep(0.05)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 from unittest.mock import MagicMock, patch
 
 from scripts.lcu.launch_context import get_input_desktop_status
@@ -8,7 +10,7 @@ from scripts.lcu.launch_context import get_input_desktop_status
 def test_input_desktop_mismatch_is_detected_and_handle_closed() -> None:
     user32 = MagicMock()
     user32.OpenInputDesktop.return_value = 123
-    with patch("scripts.lcu.launch_context.os.name", "nt"), patch(
+    with simulated_windows_os('scripts.lcu.launch_context'), patch(
         "scripts.lcu.launch_context._desktop_context",
         return_value=({"status": "ok", "value": "WinSta0"},
                       {"status": "ok", "value": "CodexSandboxDesktop"}),
@@ -29,7 +31,7 @@ def test_input_desktop_mismatch_is_detected_and_handle_closed() -> None:
 def test_input_desktop_match_allows_interactive_host() -> None:
     user32 = MagicMock()
     user32.OpenInputDesktop.return_value = 456
-    with patch("scripts.lcu.launch_context.os.name", "nt"), patch(
+    with simulated_windows_os('scripts.lcu.launch_context'), patch(
         "scripts.lcu.launch_context._desktop_context",
         return_value=({"status": "ok", "value": "WinSta0"},
                       {"status": "ok", "value": "Default"}),

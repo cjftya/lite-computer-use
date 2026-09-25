@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 import json
 import os
 import tempfile
@@ -306,7 +308,7 @@ def test_open_app_appsfolder_success() -> None:
     }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.package_family_installed", return_value=True), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
@@ -335,7 +337,7 @@ def test_paint_rejects_same_title_from_other_package() -> None:
         "session_id": 9, "creation_time": 123,
         "app_user_model_id": "Other.Paint_8wekyb3d8bbwe!App", "active": True,
     }
-    with patch("os.name", "nt"), patch("scripts.lcu.processes.get_current_session_id", return_value=9):
+    with simulated_windows_os(), patch("scripts.lcu.processes.get_current_session_id", return_value=9):
         assert not is_matching_window(observed, entry)
 
 
@@ -363,7 +365,7 @@ def test_open_app_explicit_shell_rejection_exe_fallback_success() -> None:
     ]
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.package_family_installed", return_value=True), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
@@ -396,7 +398,7 @@ def test_open_app_two_explicit_dispatch_rejections() -> None:
     )
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.package_family_installed", return_value=True), \
          patch("scripts.lcu.apps.dispatch_candidate", side_effect=[
              {"status": "rejected", "accepted": False, "backend": "shell-execute", "error_code": 1155, "fallback_eligible": True},
@@ -441,7 +443,7 @@ def test_open_app_existing_minimized_window_reused() -> None:
     }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.resolve_executable", return_value=existing_win["image_path"]), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.dispatch_candidate") as mock_dispatch, \
@@ -475,7 +477,7 @@ def test_open_app_multiple_existing_windows_is_ambiguous_without_dispatch() -> N
             "image_path": image, "session_id": 9, "creation_time": 124, "active": False}
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.resolve_executable", return_value=image), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.dispatch_candidate") as mock_dispatch, \
@@ -498,7 +500,7 @@ def test_open_app_response_fields() -> None:
     }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.resolve_executable", return_value=mock_win["image_path"]), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.windows.list_windows", return_value=[mock_win]), \
@@ -710,7 +712,7 @@ def test_open_app_new_window_focus_success() -> None:
     }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.resolve_executable", return_value=mock_win["image_path"]), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
@@ -741,7 +743,7 @@ def test_open_app_new_window_focus_failure_aborts_without_extra_candidates() -> 
     }
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.resolve_executable", side_effect=lambda target: rf"C:\Apps\{target}"), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.snapshot_processes", return_value={}), \
@@ -775,7 +777,7 @@ def test_open_app_single_existing_window_reused_d3() -> None:
     entry.window_match = {"process_names": ["chrome.exe"], "title_contains_any": ["Google Chrome"]}
 
     with patch("scripts.lcu.apps.build_app_index", return_value=[entry]), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.resolve_executable", return_value=existing_win["image_path"]), \
          patch("scripts.lcu.processes.get_current_session_id", return_value=9), \
          patch("scripts.lcu.apps.dispatch_candidate") as mock_dispatch, \

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.lcu.apps import AppEntry, LaunchCandidate, app_status, is_matching_window, window_match_status
+from scripts.lcu.apps import AppEntry, LaunchCandidate, app_status, is_matching_window, load_config_apps, window_match_status
 from scripts.lcu.ownership import owned_processes_for_window, remember_owned_processes
 from scripts.lcu.processes import ProcessIdentity
 from scripts.lcu.win_launch import DispatchReceipt, dispatch_shell
@@ -71,6 +73,57 @@ def test_configured_chrome_accepts_browser_but_rejects_pwa_identity():
     with patch('scripts.lcu.apps.resolve_executable', return_value=r'C:\Chrome\chrome.exe'):
         assert window_match_status(normal, browser) == 'match'
         assert window_match_status(pwa, browser) == 'no_match'
+
+
+@pytest.mark.parametrize('name,exe,title', [
+    ('edge', 'msedge.exe', 'New tab - Microsoft Edge'),
+    ('firefox', 'firefox.exe', 'New Tab — Mozilla Firefox'),
+])
+def test_default_browser_rules_check_identity_and_title(name, exe, title):
+    browser = next(item for item in load_config_apps() if item.name == name)
+    normal = window('C:/Browsers/' + exe, exe, title)
+    with patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe):
+        assert window_match_status(normal, browser) == 'match'
+        assert window_match_status({**normal, 'image_path': 'C:/Other/' + exe}, browser) == 'no_match'
+        assert window_match_status({**normal, 'process': 'other.exe'}, browser) == 'no_match'
+        assert window_match_status({**normal, 'title': 'New Tab'}, browser) == 'no_match'
+        assert window_match_status({**normal, 'image_path': None}, browser) == 'insufficient_evidence'
+        assert window_match_status({**normal, 'process': ''}, browser) == 'insufficient_evidence'
+        assert window_match_status({**normal, 'session_id': None}, browser) == 'insufficient_evidence'
+        with patch('scripts.lcu.processes.get_current_session_id', return_value=2):
+            assert window_match_status(normal, browser) == 'no_match'
+
+
+@pytest.mark.parametrize('name,exe,title', [
+    ('edge', 'msedge.exe', 'New tab - Microsoft Edge'),
+    ('firefox', 'firefox.exe', 'New Tab — Mozilla Firefox'),
+])
+def test_default_browser_existing_window_is_reused_without_dispatch(name, exe, title):
+    from scripts.lcu.apps import open_app
+    browser = next(item for item in load_config_apps() if item.name == name)
+    existing = window('C:/Browsers/' + exe, exe, title)
+    with patch('scripts.lcu.apps.build_app_index', return_value=[browser]), \
+         patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe), \
+         patch('scripts.lcu.apps._candidate_target_is_stale', return_value=False), \
+         patch('scripts.lcu.windows.list_windows', return_value=[existing]), \
+         patch('scripts.lcu.windows.focus_window'), \
+         patch('scripts.lcu.apps.dispatch_candidate') as dispatch:
+        result = open_app(name)
+    assert result['reused_existing'] is True
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize('name,exe,title', [
+    ('edge', 'msedge.exe', 'New tab - Microsoft Edge'),
+    ('firefox', 'firefox.exe', 'New Tab - Mozilla Firefox'),
+])
+def test_default_browser_new_window_observation_uses_same_rules(name, exe, title):
+    from scripts.lcu.apps import _poll_for_launched_window
+    browser = next(item for item in load_config_apps() if item.name == name)
+    observed = window('C:/Browsers/' + exe, exe, title)
+    with patch('scripts.lcu.apps.resolve_executable', return_value='C:/Browsers/' + exe), \
+         patch('scripts.lcu.windows.list_windows', return_value=[observed]):
+        assert _poll_for_launched_window(browser, set(), 0) == observed
 
 
 @pytest.mark.parametrize('status,expected', [('accepted', True), ('rejected', False),
@@ -157,7 +210,7 @@ def test_shell_com_rejection_and_balanced_uninitialize():
     shell = MagicMock()
     shell.ShellExecuteExW.return_value = False
     with patch.dict(sys.modules, {'pythoncom': fake_com}), \
-         patch('scripts.lcu.win_launch.os.name', 'nt'), \
+         simulated_windows_os('scripts.lcu.win_launch'), \
          patch('scripts.lcu.win_launch.ctypes.WinDLL', return_value=shell, create=True), \
          patch('scripts.lcu.win_launch.ctypes.get_last_error', return_value=2, create=True), \
          patch('scripts.lcu.win_launch.ctypes.FormatError', return_value='missing', create=True), \
@@ -173,7 +226,7 @@ def test_shell_com_initialization_failure_stops_before_dispatch():
     fake_com = MagicMock(COINIT_APARTMENTTHREADED=2)
     fake_com.CoInitializeEx.side_effect = OSError('apartment mismatch')
     with patch.dict(sys.modules, {'pythoncom': fake_com}), \
-         patch('scripts.lcu.win_launch.os.name', 'nt'), \
+         simulated_windows_os('scripts.lcu.win_launch'), \
          patch('scripts.lcu.win_launch.ctypes.WinDLL', create=True) as dll:
         receipt = dispatch_shell(LaunchSpec('demo', 'uri', 'ms-settings:'))
     assert receipt.status == 'rejected'
@@ -199,7 +252,7 @@ def test_shell_success_keeps_accepted_when_identity_query_fails_and_closes_handl
         return shell if name == 'shell32' else kernel
 
     with patch.dict(sys.modules, {'pythoncom': fake_com}), \
-         patch('scripts.lcu.win_launch.os.name', 'nt'), \
+         simulated_windows_os('scripts.lcu.win_launch'), \
          patch('scripts.lcu.win_launch.ctypes.WinDLL', side_effect=dll, create=True), \
          patch('scripts.lcu.win_launch.ctypes.set_last_error', create=True), \
          patch('scripts.lcu.win_launch.get_process_identity', side_effect=OSError('denied')):
@@ -217,7 +270,7 @@ def test_shell_call_exception_keeps_unknown_and_uninitializes():
     shell = MagicMock()
     shell.ShellExecuteExW.side_effect = OSError('dispatch interrupted')
     with patch.dict(sys.modules, {'pythoncom': fake_com}), \
-         patch('scripts.lcu.win_launch.os.name', 'nt'), \
+         simulated_windows_os('scripts.lcu.win_launch'), \
          patch('scripts.lcu.win_launch.ctypes.WinDLL', return_value=shell, create=True), \
          patch('scripts.lcu.win_launch.ctypes.set_last_error', create=True):
         receipt = dispatch_shell(LaunchSpec('demo', 'uri', 'ms-settings:'))
@@ -272,7 +325,7 @@ def test_direct_process_identity_lookup_failure_keeps_accepted():
     from scripts.lcu.win_launch import dispatch_process
     process = MagicMock(pid=202)
     with patch('scripts.lcu.win_launch.subprocess.Popen', return_value=process), \
-         patch('scripts.lcu.win_launch.os.name', 'nt'), \
+         simulated_windows_os('scripts.lcu.win_launch'), \
          patch('scripts.lcu.win_launch.get_process_identity', side_effect=OSError('denied')), \
          patch('scripts.lcu.win_launch._cwd_for', return_value='.'):
         receipt = dispatch_process(LaunchSpec('demo', 'exe', 'demo.exe'), 'demo.exe')

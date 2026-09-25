@@ -177,6 +177,8 @@ py -3.13 scripts\lcu.py set_clipboard "Copied text"
 py -3.13 scripts\lcu.py get_clipboard
 ```
 
+`press_key` and `hotkey` accept the named keys in `VK_MAP` (including aliases and F1–F12), ASCII letters A–Z, and digits 0–9. Use `type_text` for punctuation, Hangul, emoji, and other text. An invalid key is rejected before a hotkey sends any input; batch validation rejects invalid keys before the first action.
+
 ### 5. Batch Execution
 Execute deterministic multi-action sequences with static validation and fail-fast execution:
 - **Upfront validation**: The entire static action schema, including supported key names, is checked before execution. A static error prevents every action from running.

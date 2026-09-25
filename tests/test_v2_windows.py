@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -153,7 +155,7 @@ def test_close_window_normal_destruction() -> None:
     with patch("scripts.lcu.windows.find_target_window", return_value=target), \
          patch("win32gui.PostMessage") as mock_post, \
          patch("win32gui.IsWindow", return_value=0), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = close_window(hwnd=100)
         assert res["hwnd"] == 100
         assert res["title"] == "Test Window"
@@ -171,7 +173,7 @@ def test_close_window_late_destruction() -> None:
          patch("win32gui.IsWindow", side_effect=[1, 0]), \
          patch("win32gui.IsWindowVisible", side_effect=[1, 0]), \
          patch("time.sleep") as mock_sleep, \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = close_window(hwnd=100, timeout=1.0, interval=0.05)
         assert res["hwnd"] == 100
         assert res["closed"] is True
@@ -187,7 +189,7 @@ def test_close_window_timeout_failure() -> None:
          patch("win32gui.IsWindow", return_value=1), \
          patch("win32gui.IsWindowVisible", return_value=1), \
          patch("time.sleep"), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         with pytest.raises(LCUError) as exc_info:
             close_window(hwnd=100, timeout=0.1, interval=0.05)
         assert exc_info.value.code == "window_close_failed"
@@ -202,7 +204,7 @@ def test_close_window_no_force_kill() -> None:
          patch("win32gui.IsWindow", return_value=1), \
          patch("win32gui.IsWindowVisible", return_value=1), \
          patch("time.sleep"), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("subprocess.Popen") as mock_popen, \
          patch("subprocess.run") as mock_run, \
          patch("os.kill") as mock_os_kill:
@@ -223,7 +225,7 @@ def test_close_window_hidden_only_fails() -> None:
          patch("win32gui.IsWindow", return_value=1), \
          patch("win32gui.IsWindowVisible", return_value=0), \
          patch("time.sleep"), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         with pytest.raises(LCUError) as exc_info:
             close_window(hwnd=100, timeout=0.1, interval=0.05)
         assert exc_info.value.code == "window_close_failed"
@@ -236,7 +238,7 @@ def test_close_window_cloaked_only_fails() -> None:
          patch("win32gui.PostMessage"), \
          patch("win32gui.IsWindow", return_value=1), \
          patch("time.sleep"), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         with pytest.raises(LCUError) as exc_info:
             close_window(hwnd=100, timeout=0.1, interval=0.05)
         assert exc_info.value.code == "window_close_failed"

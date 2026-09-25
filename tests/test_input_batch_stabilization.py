@@ -46,6 +46,41 @@ def test_stroke_retries_failed_release() -> None:
     assert events == [0, windows.KEYEVENTF_KEYUP, windows.KEYEVENTF_KEYUP]
 
 
+@pytest.mark.parametrize('key,expected', [
+    ('a', 65), ('A', 65), ('0', 48), ('9', 57),
+    ('ENTER', 13), ('RETURN', 13), ('TAB', 9), ('ctrl', 17),
+])
+def test_supported_virtual_keys(key, expected):
+    assert windows.resolve_key(key) == expected
+
+
+@pytest.mark.parametrize('key', ['한', '😀', '!', '', None, 7, 'UNKNOWN', 'İ'])
+def test_unsupported_virtual_keys_are_rejected(key):
+    with pytest.raises(LCUError) as exc:
+        windows.resolve_key(key)
+    assert exc.value.code == 'invalid_arguments'
+
+
+def test_late_invalid_hotkey_does_not_press_modifier():
+    with patch.object(windows, 'init_windows_environment'), patch.object(windows, '_send_keybd_input') as send:
+        with pytest.raises(LCUError) as exc:
+            windows.hotkey(['CTRL', '한'])
+    assert exc.value.code == 'invalid_arguments'
+    send.assert_not_called()
+
+
+@pytest.mark.parametrize('action', [
+    {'action': 'press_key', 'key': '😀'},
+    {'action': 'hotkey', 'keys': ['CTRL', '!']},
+])
+def test_late_invalid_batch_key_prevents_every_dispatch(action):
+    with patch.object(windows, 'set_clipboard') as clipboard:
+        with pytest.raises(LCUError) as exc:
+            batch.execute_batch([{'action': 'set_clipboard', 'text': 'first'}, action])
+    assert exc.value.code == 'invalid_arguments'
+    clipboard.assert_not_called()
+
+
 def test_text_normalizes_crlf_and_sends_surrogate_pair() -> None:
     with patch.object(windows, "init_windows_environment"), patch.object(windows, "_send_keybd_input") as send:
         assert windows.type_text("A\r\nB😀한") == {"chars": 6}
@@ -97,6 +132,50 @@ def test_drag_preserves_move_error_if_release_also_fails() -> None:
         with pytest.raises(RuntimeError, match="move failed"):
             windows.drag(10, 20, 30, 40)
     gui.mouseUp.assert_called_once()
+    assert gui.FAILSAFE is True
+
+
+@pytest.mark.parametrize('error', [RuntimeError('down failed'), KeyboardInterrupt()])
+def test_drag_releases_after_mouse_down_error_or_cancel(error):
+    gui = MagicMock()
+    gui.FAILSAFE = False
+    gui.mouseDown.side_effect = error
+    with patch.object(windows, 'init_windows_environment'), patch.object(windows.time, 'sleep'), patch.dict('sys.modules', {'pyautogui': gui}):
+        with pytest.raises(type(error)):
+            windows.drag(10, 20, 30, 40)
+    gui.mouseUp.assert_called_once_with(button='left')
+    assert gui.FAILSAFE is False
+
+
+def test_drag_does_not_release_when_initial_move_fails():
+    gui = MagicMock()
+    gui.FAILSAFE = True
+    gui.moveTo.side_effect = RuntimeError('start failed')
+    with patch.object(windows, 'init_windows_environment'), patch.object(windows.time, 'sleep'), patch.dict('sys.modules', {'pyautogui': gui}):
+        with pytest.raises(RuntimeError, match='start failed'):
+            windows.drag(10, 20, 30, 40)
+    gui.mouseDown.assert_not_called()
+    gui.mouseUp.assert_not_called()
+
+
+def test_drag_reports_release_error_and_restores_false_failsafe():
+    gui = MagicMock()
+    gui.FAILSAFE = False
+    gui.mouseUp.side_effect = RuntimeError('release failed')
+    with patch.object(windows, 'init_windows_environment'), patch.object(windows.time, 'sleep'), patch.dict('sys.modules', {'pyautogui': gui}):
+        with pytest.raises(RuntimeError, match='release failed'):
+            windows.drag(10, 20, 30, 40)
+    assert gui.FAILSAFE is False
+
+
+def test_drag_preserves_mouse_down_error_when_release_also_fails():
+    gui = MagicMock()
+    gui.FAILSAFE = True
+    gui.mouseDown.side_effect = RuntimeError('down failed')
+    gui.mouseUp.side_effect = RuntimeError('release failed')
+    with patch.object(windows, 'init_windows_environment'), patch.object(windows.time, 'sleep'), patch.dict('sys.modules', {'pyautogui': gui}):
+        with pytest.raises(RuntimeError, match='down failed'):
+            windows.drag(10, 20, 30, 40)
     assert gui.FAILSAFE is True
 
 

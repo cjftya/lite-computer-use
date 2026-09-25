@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 import json
 import subprocess
 from pathlib import Path
@@ -179,7 +181,7 @@ def test_shared_wait_does_not_depend_on_dispatcher_lifetime() -> None:
         "scripts.lcu.windows.focus_window", return_value={"hwnd": 9001}
     ), patch("scripts.lcu.apps.save_app_attempt"), patch("scripts.lcu.apps.remember_owned_processes"), patch(
         "scripts.lcu.apps._recheck_window", return_value=True
-    ), patch("os.name", "nt"):
+    ), simulated_windows_os():
         result = open_app("vscode")
 
     assert result["hwnd"] == 9001

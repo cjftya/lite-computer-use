@@ -378,6 +378,8 @@ def window_match_status(win: dict[str, Any], entry: AppEntry) -> str:
     if entry.normalized in {"chrome", "edge", "firefox"}:
         if not (configured_match.get("process_names") and configured_match.get("title_contains_any")):
             return "insufficient_evidence"
+        if not proc:
+            return "insufficient_evidence"
         if entry.normalized == "chrome" and "_crx_" in observed_id:
             return "no_match"
     if configured_match:

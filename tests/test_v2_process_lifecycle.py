@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from platform_mock import simulated_windows_os
+
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -144,7 +146,7 @@ def test_n1_notepad_broker_launch_does_not_claim_process_ownership() -> None:
          patch("scripts.lcu.apps.save_app_attempt"), \
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_win], [mock_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 7771, "title": "Untitled - Notepad"}), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = open_app("notepad")
         assert res["app"] == "notepad"
         assert res["hwnd"] == 7771
@@ -176,7 +178,7 @@ def test_n2_notepad_cleanup_terminates_lingering_owned_process() -> None:
          patch("scripts.lcu.processes.validate_termination_safety", return_value=(True, "ok")), \
          patch("scripts.lcu.processes.terminate_process", return_value=True) as mock_terminate, \
          patch("time.sleep"), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = close_window(
             hwnd=7771,
             owned_processes=[owned],
@@ -207,7 +209,7 @@ def test_n2b_close_window_recovers_owned_processes_from_ledger() -> None:
          patch("win32gui.PostMessage"), \
          patch("win32gui.IsWindow", return_value=0), \
          patch("scripts.lcu.processes.is_process_alive", return_value=False), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         result = close_window(hwnd=7773)
 
     assert result["closed"] is True
@@ -237,7 +239,7 @@ def test_n3_existing_notepad_preserved() -> None:
          patch("scripts.lcu.apps.dispatch_candidate") as dispatch, \
          patch("scripts.lcu.windows.list_windows", return_value=[existing_win]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 7772, "title": "My Notes - Notepad"}), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = open_app("notepad")
         assert res["reused_existing"] is True
         assert res["hwnd"] == 7772
@@ -292,7 +294,7 @@ def test_c1_c2_chrome_new_window_with_background_baseline() -> None:
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win], [mock_new_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 8881, "title": "Google Chrome"}), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "process", "sanitized_env_applied": True}) as mock_dispatch, \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = open_app("chrome")
         # Priority 0 candidate dispatched with --new-window
         mock_dispatch.assert_called_once_with(chrome_cmd)
@@ -312,7 +314,7 @@ def test_c3_chrome_cleanup_preserves_baseline() -> None:
          patch("win32gui.PostMessage"), \
          patch("win32gui.IsWindow", return_value=0), \
          patch("scripts.lcu.processes.terminate_process") as mock_terminate, \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         # owned_processes is empty
         res = close_window(hwnd=8881, owned_processes=[])
         assert res["closed"] is True
@@ -339,7 +341,7 @@ def test_c4_chrome_unconfirmed_launch_never_rolls_back() -> None:
          patch("scripts.lcu.processes.terminate_process") as mock_terminate, \
          patch("scripts.lcu.apps._poll_for_launched_window", return_value=None), \
          patch("scripts.lcu.apps.save_app_attempt"), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={
              "status": "accepted", "accepted": True, "backend": "process",
              "sanitized_env_applied": True,
@@ -387,7 +389,7 @@ def test_v1_v2_vscode_new_window_with_daemon_processes() -> None:
          patch("scripts.lcu.windows.list_windows", side_effect=[[], [], [mock_new_win], [mock_new_win]]), \
          patch("scripts.lcu.windows.focus_window", return_value={"hwnd": 9991, "title": "Welcome - Visual Studio Code"}), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={"status": "accepted", "backend": "process", "sanitized_env_applied": True}) as mock_dispatch, \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         res = open_app("vscode")
         mock_dispatch.assert_called_once_with(code_cand)
         assert res["hwnd"] == 9991
@@ -415,7 +417,7 @@ def test_v3_vscode_unconfirmed_launch_never_rolls_back() -> None:
          patch("scripts.lcu.processes.terminate_process") as mock_terminate, \
          patch("scripts.lcu.apps._poll_for_launched_window", return_value=None), \
          patch("scripts.lcu.apps.save_app_attempt"), \
-         patch("os.name", "nt"), \
+         simulated_windows_os(), \
          patch("scripts.lcu.apps.dispatch_candidate", return_value={
              "status": "accepted", "accepted": True, "backend": "process",
              "sanitized_env_applied": True,
@@ -495,7 +497,7 @@ def test_close_window_iswindow_exception_does_not_count_as_closed() -> None:
          patch("win32gui.PostMessage"), \
          patch("win32gui.IsWindow", side_effect=Exception("RPC failure")), \
          patch("time.sleep"), \
-         patch("os.name", "nt"):
+         simulated_windows_os():
         with pytest.raises(LCUError) as exc_info:
             close_window(hwnd=100, timeout=0.1, interval=0.05)
         assert exc_info.value.code == "window_close_failed"
