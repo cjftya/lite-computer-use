@@ -10,7 +10,8 @@ from scripts.lcu.errors import LCUError
 
 
 def test_sendinput_zero_is_an_error_without_text_leak() -> None:
-    with patch.object(ctypes.windll.user32, "SendInput", return_value=0):
+    with patch.object(ctypes, "windll", create=True) as windll:
+        windll.user32.SendInput.return_value = 0
         with patch.object(windows, "init_windows_environment"):
             with pytest.raises(LCUError) as exc:
                 windows.type_text("secret")

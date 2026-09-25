@@ -4,7 +4,7 @@ Date: 2026-09-25 (Asia/Seoul)
 
 ## State and environment
 
-- Starting HEAD: `8620316353de643a1b55ca2b9374a87d174ab8e3` on `main`. The working tree was clean before the baseline run. Completion HEAD is the same; the changes in this report are uncommitted pending approval.
+- Starting HEAD: `8620316353de643a1b55ca2b9374a87d174ab8e3` on `main`. The working tree was clean before the baseline run. Local verification was completed on that HEAD with uncommitted changes; the approved commit and CI outcome are recorded in the post-push section below.
 - Environment: Windows, Python 3.13.15 (`C:\Program Files\Python313\python.exe`), session 12. `launch_context` reported `WinSta0`, process desktop `CodexSandboxDesktop-b0724d40e82c2828d69964903f8a1720`, input desktop `Default`, and `input_desktop.attached=false`.
 - Baseline: `py -3.13 -m pytest -q -p no:cacheprovider --basetemp .pytest-baseline` → **177 passed**. Dedicated pytest temporary directories were removed after testing.
 
@@ -39,4 +39,10 @@ First run `py -3.13 scripts\lcu.py launch_context` and verify `input_desktop.att
 
 - **Code changes and local regression verification:** complete on Windows Python 3.13.15. Local full suite: **207 passed, 0 failed, 0 skipped**.
 - **Real GUI verification:** pending a terminal attached to the input desktop.
-- **Remote CI:** not run for this uncommitted HEAD; no run URL exists. After approved commit and main update, inspect the matrix run for Windows 3.11/3.13 and Ubuntu 3.11/3.13 and record its URL and result here.
+- **Remote CI:** the first post-push run and follow-up are recorded below.
+
+## Post-push CI follow-up (2026-09-26)
+
+The approved commit `a34b52cc43eec2f747cdbefa6e540f0a41c86ebf` was pushed to `origin/main`. [CI run 36152154198](https://github.com/cjftya/lite-computer-use/actions/runs/36152154198) passed Windows 3.11 and 3.13, but failed Ubuntu 3.11 and 3.13 at the full pytest step. Detailed logs require repository authentication and were not available through the public API. Static inspection found tests in the full suite that patch `win32api`/`win32gui` and require Windows-only `pywin32`, which `requirements.txt` installs only on Windows. The full suite is therefore retained on Windows; Ubuntu now runs portable logic and mocked Windows contracts explicitly. `test_sendinput_zero_is_an_error_without_text_leak` now mocks the OS API object on either host.
+
+The revised Ubuntu selection passed locally on Windows Python 3.13 (**131 passed**); the full Windows suite still passed (**207 passed**). These local runs do not establish the Ubuntu result. The follow-up CI run is pending at the time of this edit.
