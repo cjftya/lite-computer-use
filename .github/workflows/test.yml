@@ -29,7 +29,7 @@ jobs:
       - name: Portable logic and mocked Windows contracts
         if: runner.os == 'Linux'
         run: >-
-          python -m pytest -q
+          python -m pytest -q --junitxml=pytest-results.xml
           tests/test_v2_orchestration.py
           tests/test_v2_batch.py
           tests/test_input_batch_stabilization.py
@@ -38,4 +38,7 @@ jobs:
           tests/test_v2_app_launch_redesign.py
           tests/test_v2_launch_safety_remediation.py
           tests/test_v2_cli_safe_launch.py
+      - name: Annotate Linux test failures
+        if: failure() && runner.os == 'Linux'
+        run: python scripts/annotate_pytest_failures.py pytest-results.xml
       - run: python -m compileall -q scripts tests
