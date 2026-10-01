@@ -257,3 +257,20 @@ Launches a live Tkinter GUI fixture with known button and canvas targets, captur
 ```powershell
 py -3.13 tests\run_smoke_tests.py
 ```
+
+### Argument errors and capture persistence
+
+Invalid CLI arguments exit with code 2 and emit one JSON error on stdout with
+`ok=false` and `error.code=invalid_arguments`; argparse usage remains on stderr.
+`action` is the recognized first command, or `unknown` when no command is identified.
+Root and command `--help` still print help and exit successfully. Runtime errors
+retain their existing exit code and response format.
+
+Screenshot `--output` files are preserved during cache cleanup, including outputs
+inside the capture directory. Legacy metadata without `cache_owned` also preserves
+its image. Only verified internal generated captures are deleted; metadata still
+expires after 24 hours or beyond the newest 50 entries. Capture indexes are replaced
+atomically before obsolete images are removed. A write or replace failure returns
+`capture_index_save_failed` rather than an unusable successful capture ID.
+URL fallback rejection or an exception returns `dispatch_failed`; success confirms
+launch request dispatch, without asserting that the page loaded.

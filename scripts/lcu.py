@@ -231,9 +231,12 @@ def main() -> None:
     # Parse arguments
     try:
         args = parser.parse_args()
-    except SystemExit:
-        # Avoid printing default argparse exit when called directly
-        return
+    except SystemExit as exc:
+        if exc.code == 0:
+            return  # argparse already printed the requested help.
+        action = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in subparsers.choices else "unknown"
+        print(output_json(format_error(action, LCUError("invalid_arguments", "Invalid command arguments; use --help for usage"))))
+        raise
 
     action = args.action
     try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -78,6 +79,7 @@ class CaptureMetadata:
     timestamp: float
     dpi_mode: str
     path: str
+    cache_owned: bool = False  # Legacy and explicit output files are never owned.
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,33 +93,63 @@ MAX_CAPTURES_IN_CACHE = 50
 CAPTURE_MAX_AGE_SECONDS = 86_400  # 24 hours
 
 
-def _prune_capture_cache(index: dict[str, CaptureMetadata]) -> dict[str, CaptureMetadata]:
+def _prune_capture_cache(index: dict[str, CaptureMetadata], *, delete_files: bool = True) -> dict[str, CaptureMetadata]:
     now = time.time()
     valid_items: list[tuple[str, CaptureMetadata]] = []
-    to_delete: list[CaptureMetadata] = []
 
     for cid, meta in index.items():
-        if now - meta.timestamp > CAPTURE_MAX_AGE_SECONDS:
-            to_delete.append(meta)
-        else:
+        if now - meta.timestamp <= CAPTURE_MAX_AGE_SECONDS:
             valid_items.append((cid, meta))
 
     # Keep only newest MAX_CAPTURES_IN_CACHE
     if len(valid_items) > MAX_CAPTURES_IN_CACHE:
         valid_items.sort(key=lambda x: x[1].timestamp, reverse=True)
-        for _, old_meta in valid_items[MAX_CAPTURES_IN_CACHE:]:
-            to_delete.append(old_meta)
         valid_items = valid_items[:MAX_CAPTURES_IN_CACHE]
 
-    for old_meta in to_delete:
-        try:
-            p = Path(old_meta.path)
-            if p.is_file():
-                p.unlink()
-        except Exception:
-            pass
+    retained = dict(valid_items)
+    if delete_files:
+        _delete_pruned_images(index, retained)
+    return retained
 
-    return dict(valid_items)
+
+def _owned_capture_path(meta: CaptureMetadata) -> Path | None:
+    """Require explicit ownership, an internal generated name, and no redirects."""
+    if meta.cache_owned is not True or not re.fullmatch(r"c_[0-9a-f]{8}", meta.captureId):
+        return None
+    try:
+        path = Path(meta.path)
+        folder = get_capture_dir()
+        if not path.is_absolute() or path.name != f"{meta.captureId}.webp":
+            return None
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+            return None
+        # Absolute lexical paths must match resolved paths, including ancestors.
+        if path.absolute() != path.resolve() or folder.absolute() != folder.resolve():
+            return None
+        if path.parent != folder.resolve():
+            return None
+        return path
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _delete_pruned_images(index: dict[str, CaptureMetadata], retained: dict[str, CaptureMetadata]) -> None:
+    # Protect reused paths, including expired user entries sharing an owned path.
+    protected = set()
+    for cid, meta in index.items():
+        if cid in retained or meta.cache_owned is not True:
+            try:
+                protected.add(Path(meta.path).resolve())
+            except (OSError, ValueError, RuntimeError):
+                return  # Uncertain ownership: preserve files.
+    for cid, meta in index.items():
+        if cid not in retained:
+            path = _owned_capture_path(meta)
+            if path is not None and path not in protected:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def _load_capture_index() -> dict[str, CaptureMetadata]:
@@ -127,22 +159,41 @@ def _load_capture_index() -> dict[str, CaptureMetadata]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {k: CaptureMetadata.from_dict(v) for k, v in data.items() if isinstance(v, dict)}
-    except Exception:
+    except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    index = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            try:
+                index[key] = CaptureMetadata.from_dict(value)
+            except (TypeError, ValueError):
+                continue
+    return index
 
 
 def _save_capture_index(index: dict[str, CaptureMetadata]) -> None:
+    temp_path = None
     try:
-        index = _prune_capture_cache(index)
-    except Exception:
-        pass
-    path = get_capture_index_path()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({k: v.to_dict() for k, v in index.items()}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        retained = _prune_capture_cache(index, delete_files=False)
+        path = get_capture_index_path()
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        with open(temp_path, "x", encoding="utf-8") as stream:
+            json.dump({key: meta.to_dict() for key, meta in retained.items()}, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+    except Exception as exc:
+        raise LCUError("capture_index_save_failed", f"Failed to save capture index: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    # The previous valid index and its files survive any persistence failure.
+    _delete_pruned_images(index, retained)
 
 
 def get_capture_metadata(capture_id: str) -> CaptureMetadata:
@@ -429,12 +480,23 @@ def capture_screenshot(
         scale_y=scale_y,
         timestamp=time.time(),
         dpi_mode="Per-Monitor-V2",
-        path=str(save_file.resolve()),
+        path=str(save_file.absolute()),
+        cache_owned=output_path is None,
     )
 
     index = _load_capture_index()
     index[cid] = metadata
-    _save_capture_index(index)
+    try:
+        _save_capture_index(index)
+    except LCUError:
+        # Only roll back this call's generated file, never an explicit output.
+        owned_path = _owned_capture_path(metadata)
+        if owned_path is not None:
+            try:
+                owned_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
     return {
         "captureId": cid,

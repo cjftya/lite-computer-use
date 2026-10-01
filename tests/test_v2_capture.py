@@ -20,6 +20,14 @@ from scripts.lcu.capture import (
 from scripts.lcu.errors import LCUError
 
 
+@pytest.fixture(autouse=True)
+def isolated_capture_cache(tmp_path, monkeypatch):
+    folder = tmp_path / "captures"
+    folder.mkdir()
+    monkeypatch.setattr("scripts.lcu.capture.get_capture_dir", lambda: folder)
+    monkeypatch.setattr("scripts.lcu.capture.get_capture_index_path", lambda: tmp_path / "index.json")
+
+
 @pytest.fixture
 def mock_capture_index(tmp_path: Path) -> None:
     # Set up sample metadata in index
@@ -169,10 +177,10 @@ def test_capture_cache_pruning(tmp_path: Path) -> None:
     index: dict[str, CaptureMetadata] = {}
     file_paths: list[Path] = []
     for i in range(55):
-        f = tmp_path / f"img_{i}.webp"
+        f = tmp_path / "captures" / f"c_{i:08x}.webp"
         f.write_text(f"dummy content {i}")
         file_paths.append(f)
-        cid = f"c_{i:04d}"
+        cid = f"c_{i:08x}"
         index[cid] = CaptureMetadata(
             captureId=cid,
             source="screen",
@@ -190,19 +198,20 @@ def test_capture_cache_pruning(tmp_path: Path) -> None:
             timestamp=now - (55 - i) * 10,  # oldest first
             dpi_mode="Per-Monitor-V2",
             path=str(f),
+            cache_owned=True,
         )
 
     pruned = _prune_capture_cache(index)
     assert len(pruned) == MAX_CAPTURES_IN_CACHE  # 50
     # The 5 oldest items (0..4) must be removed
     for i in range(5):
-        cid = f"c_{i:04d}"
+        cid = f"c_{i:08x}"
         assert cid not in pruned
         assert not file_paths[i].exists()  # file unlinked from disk
 
     # The 50 newest items (5..54) must be kept
     for i in range(5, 55):
-        cid = f"c_{i:04d}"
+        cid = f"c_{i:08x}"
         assert cid in pruned
         assert file_paths[i].exists()
 

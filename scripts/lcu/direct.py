@@ -157,7 +157,8 @@ def open_url(url: str) -> dict[str, Any]:
         import webbrowser
 
         try:
-            webbrowser.open(url.strip())
+            if not webbrowser.open(url.strip()):
+                raise LCUError("dispatch_failed", "Browser rejected the URL launch request")
         except Exception as exc:
             raise LCUError("dispatch_failed", f"Failed to open URL: {exc}") from exc
 

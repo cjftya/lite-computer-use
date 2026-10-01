@@ -38,6 +38,7 @@ jobs:
           tests/test_v2_app_launch_redesign.py
           tests/test_v2_launch_safety_remediation.py
           tests/test_v2_cli_safe_launch.py
+          tests/test_defect_fixes.py
       - name: Annotate Linux test failures
         if: failure() && runner.os == 'Linux'
         run: python scripts/annotate_pytest_failures.py pytest-results.xml
